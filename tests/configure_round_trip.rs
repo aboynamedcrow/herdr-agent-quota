@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::tempdir;
 
 fn install_herdr_stub(state: &Path, agent_list: &str) -> (PathBuf, PathBuf) {
@@ -28,6 +28,30 @@ fn install_herdr_stub(state: &Path, agent_list: &str) -> (PathBuf, PathBuf) {
     permissions.set_mode(0o755);
     fs::set_permissions(&executable, permissions).unwrap();
     (executable, log)
+}
+
+fn future_reset_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after unix epoch")
+        .as_secs()
+        + 3_600
+}
+
+fn claude_statusline_windows(
+    session_id: &str,
+    five_hour_used: f64,
+    seven_day_used: Option<f64>,
+    reset: u64,
+) -> String {
+    match seven_day_used {
+        Some(week_used) => format!(
+            r#"{{"session_id":"{session_id}","rate_limits":{{"five_hour":{{"used_percentage":{five_hour_used},"resets_at":{reset}}},"seven_day":{{"used_percentage":{week_used},"resets_at":{reset}}}}}}}"#
+        ),
+        None => format!(
+            r#"{{"session_id":"{session_id}","rate_limits":{{"five_hour":{{"used_percentage":{five_hour_used},"resets_at":{reset}}}}}}}"#
+        ),
+    }
 }
 
 fn run_claude_collector(state: &Path, herdr: &Path, input: &[u8]) {
@@ -549,10 +573,14 @@ fn claude_cache_is_published_by_refresh_event() {
         state.path(),
         r#"{"result":{"agents":[{"agent":"claude","pane_id":"w1:p1"}]}}"#,
     );
+    let reset = future_reset_unix();
     run_claude_collector(
         state.path(),
         &herdr_stub,
-        include_bytes!("fixtures/claude/statusline-both.json"),
+        format!(
+            r#"{{"rate_limits":{{"five_hour":{{"used_percentage":58.0,"resets_at":{reset}}},"seven_day":{{"used_percentage":27.0,"resets_at":{reset}}}}}}}"#
+        )
+        .as_bytes(),
     );
     assert!(!herdr_log.exists());
 
@@ -643,28 +671,17 @@ fn concurrent_claude_accounts_keep_their_own_quota_windows() {
             {"agent":"claude","pane_id":"w2:p1","agent_session":{"value":"personal-session"}}
         ]}}"#,
     );
+    let reset = future_reset_unix();
     run_claude_collector_with_config_dir(
         state.path(),
         &herdr_stub,
-        br#"{
-            "session_id": "work-session",
-            "rate_limits": {
-                "five_hour": {"used_percentage": 18.0, "resets_at": 2000000000},
-                "seven_day": {"used_percentage": 10.0, "resets_at": 2000000000}
-            }
-        }"#,
+        claude_statusline_windows("work-session", 18.0, Some(10.0), reset).as_bytes(),
         Some(&work_config),
     );
     run_claude_collector_with_config_dir(
         state.path(),
         &herdr_stub,
-        br#"{
-            "session_id": "personal-session",
-            "rate_limits": {
-                "five_hour": {"used_percentage": 82.0, "resets_at": 2000000000},
-                "seven_day": {"used_percentage": 90.0, "resets_at": 2000000000}
-            }
-        }"#,
+        claude_statusline_windows("personal-session", 82.0, Some(90.0), reset).as_bytes(),
         Some(&personal_config),
     );
 
@@ -719,26 +736,17 @@ fn claude_panes_on_the_same_profile_share_the_newest_quota() {
             {"agent":"claude","pane_id":"w2:p1","agent_session":{"value":"session-a"}}
         ]}}"#,
     );
+    let reset = future_reset_unix();
     run_claude_collector_with_config_dir(
         state.path(),
         &herdr_stub,
-        br#"{
-            "session_id": "session-c",
-            "rate_limits": {
-                "five_hour": {"used_percentage": 5.0, "resets_at": 2000000000}
-            }
-        }"#,
+        claude_statusline_windows("session-c", 5.0, None, reset).as_bytes(),
         Some(&profile),
     );
     run_claude_collector_with_config_dir(
         state.path(),
         &herdr_stub,
-        br#"{
-            "session_id": "session-a",
-            "rate_limits": {
-                "five_hour": {"used_percentage": 92.0, "resets_at": 2000000000}
-            }
-        }"#,
+        claude_statusline_windows("session-a", 92.0, None, reset).as_bytes(),
         Some(&profile),
     );
 
@@ -774,37 +782,23 @@ fn idle_claude_statusline_tick_does_not_regress_shared_profile_quota() {
             {"agent":"claude","pane_id":"w2:p1","agent_session":{"value":"session-a"}}
         ]}}"#,
     );
+    let reset = future_reset_unix();
     run_claude_collector_with_config_dir(
         state.path(),
         &herdr_stub,
-        br#"{
-            "session_id": "session-c",
-            "rate_limits": {
-                "five_hour": {"used_percentage": 5.0, "resets_at": 2000000000}
-            }
-        }"#,
+        claude_statusline_windows("session-c", 5.0, None, reset).as_bytes(),
         Some(&profile),
     );
     run_claude_collector_with_config_dir(
         state.path(),
         &herdr_stub,
-        br#"{
-            "session_id": "session-a",
-            "rate_limits": {
-                "five_hour": {"used_percentage": 92.0, "resets_at": 2000000000}
-            }
-        }"#,
+        claude_statusline_windows("session-a", 92.0, None, reset).as_bytes(),
         Some(&profile),
     );
     run_claude_collector_with_config_dir(
         state.path(),
         &herdr_stub,
-        br#"{
-            "session_id": "session-c",
-            "rate_limits": {
-                "five_hour": {"used_percentage": 5.0, "resets_at": 2000000000}
-            }
-        }"#,
+        claude_statusline_windows("session-c", 5.0, None, reset).as_bytes(),
         Some(&profile),
     );
 
@@ -843,12 +837,7 @@ fn claude_new_session_without_rate_limits_keeps_profile_quota() {
     run_claude_collector_with_config_dir(
         state.path(),
         &herdr_stub,
-        br#"{
-            "session_id": "session-a",
-            "rate_limits": {
-                "five_hour": {"used_percentage": 18.0, "resets_at": 2000000000}
-            }
-        }"#,
+        claude_statusline_windows("session-a", 18.0, None, future_reset_unix()).as_bytes(),
         Some(&profile),
     );
     run_claude_collector_with_config_dir(
