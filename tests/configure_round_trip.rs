@@ -763,6 +763,72 @@ fn claude_panes_on_the_same_profile_share_the_newest_quota() {
 }
 
 #[test]
+fn idle_claude_statusline_tick_does_not_regress_shared_profile_quota() {
+    let state = tempdir().unwrap();
+    let profile = state.path().join("claude-profile");
+    fs::create_dir_all(&profile).unwrap();
+    let (herdr_stub, herdr_log) = install_herdr_stub(
+        state.path(),
+        r#"{"result":{"agents":[
+            {"agent":"claude","pane_id":"w1:p1","agent_session":{"value":"session-c"}},
+            {"agent":"claude","pane_id":"w2:p1","agent_session":{"value":"session-a"}}
+        ]}}"#,
+    );
+    run_claude_collector_with_config_dir(
+        state.path(),
+        &herdr_stub,
+        br#"{
+            "session_id": "session-c",
+            "rate_limits": {
+                "five_hour": {"used_percentage": 5.0, "resets_at": 2000000000}
+            }
+        }"#,
+        Some(&profile),
+    );
+    run_claude_collector_with_config_dir(
+        state.path(),
+        &herdr_stub,
+        br#"{
+            "session_id": "session-a",
+            "rate_limits": {
+                "five_hour": {"used_percentage": 92.0, "resets_at": 2000000000}
+            }
+        }"#,
+        Some(&profile),
+    );
+    run_claude_collector_with_config_dir(
+        state.path(),
+        &herdr_stub,
+        br#"{
+            "session_id": "session-c",
+            "rate_limits": {
+                "five_hour": {"used_percentage": 5.0, "resets_at": 2000000000}
+            }
+        }"#,
+        Some(&profile),
+    );
+
+    run_claude_refresh(state.path(), &herdr_stub);
+    let report = fs::read_to_string(herdr_log).unwrap();
+    let idle_report = report
+        .lines()
+        .find(|line| line.contains("w1:p1"))
+        .expect("idle pane reported");
+    let live_report = report
+        .lines()
+        .find(|line| line.contains("w2:p1"))
+        .expect("live pane reported");
+    assert!(
+        idle_report.contains("quota_5h_danger=5h 8%"),
+        "{idle_report}"
+    );
+    assert!(
+        live_report.contains("quota_5h_danger=5h 8%"),
+        "{live_report}"
+    );
+}
+
+#[test]
 fn claude_new_session_without_rate_limits_keeps_profile_quota() {
     let state = tempdir().unwrap();
     let profile = state.path().join("claude-profile");
