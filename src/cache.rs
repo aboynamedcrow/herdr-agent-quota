@@ -2,7 +2,7 @@ use crate::cli::{
     AgentOrder, BrandColors, FieldSet, LowQuotaAlert, PercentStyle, SidebarLayout, SidebarRowGap,
 };
 use crate::model::{
-    merge_omitted_window_list, BillingTarget, ContextUsage, Provider, ProviderSnapshot,
+    merge_omitted_window_list, BillingTarget, ContextUsage, Provider, ProviderSnapshot, UsageWindow,
 };
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
@@ -203,8 +203,20 @@ impl CacheStore {
     pub fn save_statusline_observation(
         &self,
         provider: Provider,
+        snapshot: ProviderSnapshot,
+        observation: &Value,
+    ) -> Result<()> {
+        self.save_statusline_observation_with_quota_scope(provider, snapshot, observation, None)
+    }
+
+    /// Claude statusLine observations also stamp an opaque profile scope so
+    /// idle panes on the same `CLAUDE_CONFIG_DIR` share the newest quota.
+    pub fn save_statusline_observation_with_quota_scope(
+        &self,
+        provider: Provider,
         mut snapshot: ProviderSnapshot,
         observation: &Value,
+        quota_scope: Option<&str>,
     ) -> Result<()> {
         self.ensure()?;
         let session_id = statusline_session_id(observation);
@@ -249,7 +261,7 @@ impl CacheStore {
                     .insert(session_id.to_string(), context);
             }
         }
-        merge_session_windows(&mut snapshot, previous_snapshot, session_id);
+        merge_session_windows(&mut snapshot, previous_snapshot, session_id, quota_scope);
         let current_session_ids = session_id
             .map(|session_id| vec![session_id.to_string()])
             .unwrap_or_default();
@@ -344,7 +356,7 @@ impl CacheStore {
                     .insert(session_id.to_string(), context);
             }
         }
-        merge_session_windows(&mut snapshot, previous.as_ref(), session_id);
+        merge_session_windows(&mut snapshot, previous.as_ref(), session_id, None);
         let current_session_ids = session_id
             .map(|session_id| vec![session_id.to_string()])
             .unwrap_or_default();
@@ -812,6 +824,7 @@ fn merge_session_windows(
     snapshot: &mut ProviderSnapshot,
     previous: Option<&ProviderSnapshot>,
     session_id: Option<&str>,
+    quota_scope: Option<&str>,
 ) {
     if let Some(previous) = previous {
         for (session_id, windows) in &previous.session_windows {
@@ -820,19 +833,42 @@ fn merge_session_windows(
                 .entry(session_id.clone())
                 .or_insert_with(|| windows.clone());
         }
-        match session_id {
-            Some(session_id) => {
-                let previous_windows = previous
-                    .session_windows
-                    .get(session_id)
-                    .map(Vec::as_slice)
-                    .or_else(|| {
-                        previous
-                            .session_windows
-                            .is_empty()
-                            .then_some(previous.windows.as_slice())
-                    });
-                if let Some(previous_windows) = previous_windows {
+        for (session_id, scope) in &previous.session_quota_scopes {
+            snapshot
+                .session_quota_scopes
+                .entry(session_id.clone())
+                .or_insert_with(|| scope.clone());
+        }
+        for (scope, windows) in &previous.quota_scope_windows {
+            snapshot
+                .quota_scope_windows
+                .entry(scope.clone())
+                .or_insert_with(|| windows.clone());
+        }
+    }
+    let resolved_scope = session_id.and_then(|session_id| {
+        quota_scope.map(str::to_string).or_else(|| {
+            snapshot
+                .session_quota_scopes
+                .get(session_id)
+                .cloned()
+                .or_else(|| {
+                    previous
+                        .and_then(|previous| previous.session_quota_scopes.get(session_id).cloned())
+                })
+        })
+    });
+    if let (Some(session_id), Some(scope)) = (session_id, resolved_scope.as_deref()) {
+        snapshot
+            .session_quota_scopes
+            .insert(session_id.to_string(), scope.to_string());
+    }
+    if let Some(previous) = previous {
+        match (session_id, resolved_scope.as_deref()) {
+            (Some(session_id), scope) => {
+                let previous_windows = previous_windows_for_merge(previous, session_id, scope)
+                    .map(|windows| windows.to_vec());
+                if let Some(previous_windows) = previous_windows.as_deref() {
                     merge_omitted_window_list(
                         &mut snapshot.windows,
                         previous_windows,
@@ -840,7 +876,7 @@ fn merge_session_windows(
                     );
                 }
             }
-            None => snapshot.merge_omitted_windows(previous),
+            (None, _) => snapshot.merge_omitted_windows(previous),
         }
     }
     if let Some(session_id) = session_id {
@@ -848,12 +884,49 @@ fn merge_session_windows(
             .session_windows
             .insert(session_id.to_string(), snapshot.windows.clone());
     }
+    if let Some(scope) = resolved_scope.as_deref() {
+        if !snapshot.windows.is_empty() {
+            snapshot
+                .quota_scope_windows
+                .insert(scope.to_string(), snapshot.windows.clone());
+        }
+    }
+}
+
+fn previous_windows_for_merge<'a>(
+    previous: &'a ProviderSnapshot,
+    session_id: &str,
+    quota_scope: Option<&str>,
+) -> Option<&'a [UsageWindow]> {
+    if let Some(scope) = quota_scope {
+        if let Some(windows) = previous.quota_scope_windows.get(scope) {
+            return Some(windows.as_slice());
+        }
+        return previous.session_windows.get(session_id).map(Vec::as_slice);
+    }
+    previous
+        .session_windows
+        .get(session_id)
+        .map(Vec::as_slice)
+        .or_else(|| {
+            previous
+                .session_windows
+                .is_empty()
+                .then_some(previous.windows.as_slice())
+        })
 }
 
 fn prune_session_diagnostics(snapshot: &mut ProviderSnapshot, current_session_ids: &[String]) {
     prune_session_map(&mut snapshot.session_models, current_session_ids);
     prune_session_map(&mut snapshot.session_contexts, current_session_ids);
     prune_session_map(&mut snapshot.session_windows, current_session_ids);
+    prune_session_map(&mut snapshot.session_quota_scopes, current_session_ids);
+    snapshot.quota_scope_windows.retain(|scope, _| {
+        snapshot
+            .session_quota_scopes
+            .values()
+            .any(|mapped| mapped == scope)
+    });
 }
 
 fn prune_session_map<T>(map: &mut BTreeMap<String, T>, current_session_ids: &[String]) {
@@ -1130,6 +1203,233 @@ mod tests {
             90.0
         );
         assert!(saved.windows_for_session(Some("unknown")).is_empty());
+    }
+
+    #[test]
+    fn statusline_observations_share_quota_windows_for_the_same_profile_scope() {
+        let directory = tempdir().unwrap();
+        let cache = CacheStore::new(directory.path());
+        cache
+            .save_statusline_observation_with_quota_scope(
+                Provider::Claude,
+                ProviderSnapshot::new(
+                    Provider::Claude,
+                    vec![UsageWindow::new(
+                        WindowKind::FiveHour,
+                        5.0,
+                        Some(ResetAt::from_unix_seconds(16_000)),
+                    )
+                    .unwrap()],
+                    1,
+                ),
+                &json!({"session_id": "session-c"}),
+                Some("scope-w"),
+            )
+            .unwrap();
+        cache
+            .save_statusline_observation_with_quota_scope(
+                Provider::Claude,
+                ProviderSnapshot::new(
+                    Provider::Claude,
+                    vec![UsageWindow::new(
+                        WindowKind::FiveHour,
+                        92.0,
+                        Some(ResetAt::from_unix_seconds(16_000)),
+                    )
+                    .unwrap()],
+                    2,
+                ),
+                &json!({"session_id": "session-a"}),
+                Some("scope-w"),
+            )
+            .unwrap();
+
+        let saved = cache
+            .load_statusline_observation(Provider::Claude)
+            .unwrap()
+            .unwrap()
+            .snapshot;
+        assert_eq!(
+            saved.windows_for_session(Some("session-c"))[0].used_percent,
+            92.0
+        );
+        assert_eq!(
+            saved.windows_for_session(Some("session-a"))[0].used_percent,
+            92.0
+        );
+        assert_eq!(saved.session_quota_scopes["session-c"], "scope-w");
+        assert_eq!(saved.session_quota_scopes["session-a"], "scope-w");
+    }
+
+    #[test]
+    fn statusline_observations_keep_quota_isolated_across_profile_scopes() {
+        let directory = tempdir().unwrap();
+        let cache = CacheStore::new(directory.path());
+        cache
+            .save_statusline_observation_with_quota_scope(
+                Provider::Claude,
+                ProviderSnapshot::new(
+                    Provider::Claude,
+                    vec![UsageWindow::new(
+                        WindowKind::FiveHour,
+                        18.0,
+                        Some(ResetAt::from_unix_seconds(16_000)),
+                    )
+                    .unwrap()],
+                    1,
+                ),
+                &json!({"session_id": "work"}),
+                Some("scope-w"),
+            )
+            .unwrap();
+        cache
+            .save_statusline_observation_with_quota_scope(
+                Provider::Claude,
+                ProviderSnapshot::new(
+                    Provider::Claude,
+                    vec![UsageWindow::new(
+                        WindowKind::FiveHour,
+                        82.0,
+                        Some(ResetAt::from_unix_seconds(16_000)),
+                    )
+                    .unwrap()],
+                    2,
+                ),
+                &json!({"session_id": "personal"}),
+                Some("scope-p"),
+            )
+            .unwrap();
+
+        let saved = cache
+            .load_statusline_observation(Provider::Claude)
+            .unwrap()
+            .unwrap()
+            .snapshot;
+        assert_eq!(
+            saved.windows_for_session(Some("work"))[0].used_percent,
+            18.0
+        );
+        assert_eq!(
+            saved.windows_for_session(Some("personal"))[0].used_percent,
+            82.0
+        );
+    }
+
+    #[test]
+    fn empty_rate_limits_on_a_new_session_do_not_clear_profile_quota() {
+        let directory = tempdir().unwrap();
+        let cache = CacheStore::new(directory.path());
+        cache
+            .save_statusline_observation_with_quota_scope(
+                Provider::Claude,
+                ProviderSnapshot::new(
+                    Provider::Claude,
+                    vec![UsageWindow::new(
+                        WindowKind::FiveHour,
+                        18.0,
+                        Some(ResetAt::from_unix_seconds(16_000)),
+                    )
+                    .unwrap()],
+                    1,
+                ),
+                &json!({"session_id": "session-a"}),
+                Some("scope-w"),
+            )
+            .unwrap();
+        cache
+            .save_statusline_observation_with_quota_scope(
+                Provider::Claude,
+                ProviderSnapshot::new(Provider::Claude, vec![], 2),
+                &json!({"session_id": "session-b"}),
+                Some("scope-w"),
+            )
+            .unwrap();
+
+        let saved = cache
+            .load_statusline_observation(Provider::Claude)
+            .unwrap()
+            .unwrap()
+            .snapshot;
+        assert_eq!(
+            saved.windows_for_session(Some("session-a"))[0].used_percent,
+            18.0
+        );
+        assert_eq!(
+            saved.windows_for_session(Some("session-b"))[0].used_percent,
+            18.0
+        );
+    }
+
+    #[test]
+    fn omitted_five_hour_window_is_restored_from_the_same_profile_scope() {
+        let directory = tempdir().unwrap();
+        let cache = CacheStore::new(directory.path());
+        cache
+            .save_statusline_observation_with_quota_scope(
+                Provider::Claude,
+                ProviderSnapshot::new(
+                    Provider::Claude,
+                    vec![
+                        UsageWindow::new(
+                            WindowKind::FiveHour,
+                            22.0,
+                            Some(ResetAt::from_unix_seconds(2_000)),
+                        )
+                        .unwrap(),
+                        UsageWindow::new(
+                            WindowKind::Weekly,
+                            65.0,
+                            Some(ResetAt::from_unix_seconds(10_000)),
+                        )
+                        .unwrap(),
+                    ],
+                    1_000,
+                ),
+                &json!({"session_id": "session-a"}),
+                Some("scope-w"),
+            )
+            .unwrap();
+        cache
+            .save_statusline_observation_with_quota_scope(
+                Provider::Claude,
+                ProviderSnapshot::new(
+                    Provider::Claude,
+                    vec![UsageWindow::new(
+                        WindowKind::Weekly,
+                        66.0,
+                        Some(ResetAt::from_unix_seconds(10_000)),
+                    )
+                    .unwrap()],
+                    1_200,
+                ),
+                &json!({"session_id": "session-b"}),
+                Some("scope-w"),
+            )
+            .unwrap();
+
+        let saved = cache
+            .load_statusline_observation(Provider::Claude)
+            .unwrap()
+            .unwrap()
+            .snapshot;
+        assert_eq!(
+            saved
+                .windows_for_session(Some("session-a"))
+                .iter()
+                .find(|window| window.kind == WindowKind::FiveHour)
+                .unwrap()
+                .used_percent,
+            22.0
+        );
+        assert_eq!(
+            saved
+                .windows_for_session(Some("session-b"))
+                .iter()
+                .find(|window| window.kind == WindowKind::FiveHour)
+                .unwrap()
+                .used_percent,
+            22.0
+        );
     }
 
     #[test]
@@ -1610,6 +1910,42 @@ mod tests {
         assert!(saved
             .session_models
             .contains_key(&format!("session-{}", MAX_STATUSLINE_SESSIONS + 7)));
+    }
+
+    #[test]
+    fn unreferenced_quota_scope_windows_are_pruned_with_sessions() {
+        let directory = tempdir().unwrap();
+        let cache = CacheStore::new(directory.path());
+        for index in 0..(MAX_STATUSLINE_SESSIONS + 8) {
+            let session_id = format!("session-{index}");
+            let scope = format!("scope-{index}");
+            cache
+                .save_statusline_observation_with_quota_scope(
+                    Provider::Claude,
+                    ProviderSnapshot::new(
+                        Provider::Claude,
+                        vec![UsageWindow::new(WindowKind::Weekly, 1.0, None).unwrap()],
+                        index as u64,
+                    )
+                    .with_model(Some(format!("model-{index}")))
+                    .with_context(Some(ContextUsage::new(0.0).unwrap())),
+                    &json!({"session_id": session_id}),
+                    Some(&scope),
+                )
+                .unwrap();
+        }
+
+        let saved = cache
+            .load_statusline_observation(Provider::Claude)
+            .unwrap()
+            .unwrap()
+            .snapshot;
+        assert_eq!(saved.session_quota_scopes.len(), MAX_STATUSLINE_SESSIONS);
+        assert_eq!(saved.quota_scope_windows.len(), MAX_STATUSLINE_SESSIONS);
+        assert!(saved
+            .session_quota_scopes
+            .values()
+            .all(|scope| saved.quota_scope_windows.contains_key(scope)));
     }
 
     #[test]

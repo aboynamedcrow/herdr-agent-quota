@@ -142,6 +142,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn expired_windows_are_not_rendered_as_live_dashboard_quota() {
+        let snapshot = ProviderSnapshot::new(
+            Provider::Claude,
+            vec![UsageWindow::new(
+                WindowKind::FiveHour,
+                20.0,
+                Some(ResetAt::from_unix_seconds(1_000)),
+            )
+            .unwrap()],
+            0,
+        );
+        let rendered = render_provider(
+            Provider::Claude,
+            Some(&snapshot),
+            1_001,
+            PercentStyle::default(),
+        );
+        assert!(rendered.contains("Claude N/A"), "{rendered}");
+        assert!(!rendered.contains("80%"), "{rendered}");
+        assert!(!rendered.contains("20%"), "{rendered}");
+    }
+
     /// The sidebar has no monthly token, so the dashboard is where a Go plan's
     /// 30d bucket has to surface. It appears only once something is cached.
     #[test]
@@ -157,13 +180,13 @@ mod tests {
                     UsageWindow::new(
                         WindowKind::FiveHour,
                         10.0,
-                        Some(ResetAt::from_unix_seconds(3_600)),
+                        Some(ResetAt::from_unix_seconds(2_000_000_000)),
                     )
                     .unwrap(),
                     UsageWindow::new(
                         WindowKind::Monthly,
                         30.0,
-                        Some(ResetAt::from_unix_seconds(1_500_000)),
+                        Some(ResetAt::from_unix_seconds(2_000_000_000)),
                     )
                     .unwrap(),
                 ],

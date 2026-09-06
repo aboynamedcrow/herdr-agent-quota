@@ -33,6 +33,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Idle Claude panes on the same `CLAUDE_CONFIG_DIR` profile now share that
+  profile's newest 5h/7d reading instead of freezing the last statusLine tick
+  for each conversation. Separate work/personal config directories stay
+  isolated, including when their reset times happen to match. A window whose
+  `resets_at` has already passed is shown as unknown rather than as a live
+  percentage. Based on the report in #57.
 - `configure` no longer runs `normalize_official_row` when generating
   `rows_by_agent` from user-owned shared rows, so tokens such as `pane` and
   `terminal_title_stripped` stay intact. With brand colors off, those custom
