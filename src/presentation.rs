@@ -1,7 +1,7 @@
 use crate::cli::PercentStyle;
 use crate::model::{
-    format_percent, long_window, window_in, Provider, ProviderSnapshot, ResetAt, Severity,
-    UsageWindow, WindowKind,
+    format_percent, live_windows, long_window, window_in, Provider, ProviderSnapshot, ResetAt,
+    Severity, UsageWindow, WindowKind,
 };
 
 /// Exactly the values a pane can be given.
@@ -89,6 +89,8 @@ impl MetadataTokens {
         windows: &[UsageWindow],
         style: PercentStyle,
     ) -> Self {
+        let live = live_windows(windows, now_unix);
+        let windows = live.as_slice();
         let quota_provider = snapshot.provider.display_name().to_string();
         let quota_model = model.unwrap_or_default().to_string();
         let omp_windows = snapshot.source.starts_with("omp.");
@@ -193,8 +195,9 @@ pub fn dashboard_summary(
     now_unix: u64,
     style: PercentStyle,
 ) -> String {
+    let live = live_windows(&snapshot.windows, now_unix);
     windows_summary(
-        &snapshot.windows,
+        &live,
         &[
             WindowKind::FiveHour,
             WindowKind::Weekly,
@@ -946,6 +949,90 @@ mod tests {
         );
         assert_eq!(unknown.quota_5h, "5h N/A");
         assert_eq!(unknown.quota_week, "");
+    }
+
+    #[test]
+    fn claude_panes_on_the_same_profile_share_the_newest_quota() {
+        let mut snapshot = ProviderSnapshot::new(
+            Provider::Claude,
+            vec![window(WindowKind::FiveHour, 92.0, 14_820)],
+            0,
+        );
+        snapshot
+            .session_quota_scopes
+            .insert("session-c".to_string(), "scope-w".to_string());
+        snapshot
+            .session_quota_scopes
+            .insert("session-a".to_string(), "scope-w".to_string());
+        snapshot.session_windows.insert(
+            "session-c".to_string(),
+            vec![window(WindowKind::FiveHour, 5.0, 14_820)],
+        );
+        snapshot.session_windows.insert(
+            "session-a".to_string(),
+            vec![window(WindowKind::FiveHour, 92.0, 14_820)],
+        );
+        snapshot.quota_scope_windows.insert(
+            "scope-w".to_string(),
+            vec![window(WindowKind::FiveHour, 92.0, 14_820)],
+        );
+
+        let idle = MetadataTokens::from_snapshot_for_pane(
+            &snapshot,
+            0,
+            Some("session-c"),
+            PercentStyle::default(),
+        );
+        let live = MetadataTokens::from_snapshot_for_pane(
+            &snapshot,
+            0,
+            Some("session-a"),
+            PercentStyle::default(),
+        );
+        assert_eq!(idle.quota_5h, "5h 8% 4h07m");
+        assert_eq!(live.quota_5h, "5h 8% 4h07m");
+        assert_eq!(idle.quota_headroom, Some(8));
+        assert_eq!(live.quota_headroom, Some(8));
+    }
+
+    #[test]
+    fn an_expired_window_is_not_shown_as_live_quota() {
+        let snapshot = ProviderSnapshot::new(
+            Provider::Claude,
+            vec![window(WindowKind::FiveHour, 20.0, 1_000)],
+            0,
+        );
+        let tokens = MetadataTokens::from_snapshot(&snapshot, 1_001);
+        assert_eq!(tokens.quota_5h, "5h N/A");
+        assert_eq!(tokens.quota_5h_severity, Some(Severity::Unknown));
+        assert_eq!(tokens.quota_headroom, None);
+        assert!(!tokens.quota_5h.contains("80%"), "{tokens:?}");
+        assert_eq!(
+            dashboard_summary(&snapshot, 1_001, PercentStyle::default()),
+            ""
+        );
+        assert_eq!(
+            ProviderSnapshot::severity_for_windows(Provider::Claude, &snapshot.windows, 1_001),
+            Severity::Unknown
+        );
+    }
+
+    #[test]
+    fn an_expired_five_hour_window_does_not_drive_headroom_or_severity() {
+        let snapshot = ProviderSnapshot::new(
+            Provider::Claude,
+            vec![
+                window(WindowKind::FiveHour, 95.0, 1_000),
+                window(WindowKind::Weekly, 10.0, 10_000),
+            ],
+            0,
+        );
+        let tokens = MetadataTokens::from_snapshot(&snapshot, 1_001);
+        assert_eq!(tokens.quota_5h, "5h N/A");
+        assert_eq!(tokens.quota_5h_severity, Some(Severity::Unknown));
+        assert!(tokens.quota_week.starts_with("7d 90%"), "{tokens:?}");
+        assert_eq!(tokens.quota_headroom, Some(90));
+        assert_eq!(tokens.quota_week_severity, Some(Severity::Normal));
     }
 
     #[test]

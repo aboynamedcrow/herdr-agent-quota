@@ -80,7 +80,7 @@ fn claude_fixture_contains_both_subscription_windows() {
     );
     assert_eq!(
         snapshot.window(WindowKind::Weekly).unwrap().resets_at,
-        Some(ResetAt::from_unix_seconds(1_787_400_000))
+        Some(ResetAt::from_unix_seconds(1_913_630_400))
     );
 }
 

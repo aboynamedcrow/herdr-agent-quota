@@ -382,6 +382,15 @@ impl UsageWindow {
             .as_deref()
             .unwrap_or_else(|| self.kind.label())
     }
+
+    /// Whether this window can still be shown as a live reading.
+    ///
+    /// A known `resets_at` in the past or present is expired. Missing reset
+    /// times cannot be proven stale, so they stay visible.
+    pub fn is_current(&self, now_unix: u64) -> bool {
+        self.resets_at
+            .is_none_or(|reset| reset.unix_seconds() > now_unix)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -578,8 +587,22 @@ pub struct ProviderSnapshot {
     /// (Claude, Agy) can run two signed-in accounts into one cache file, and
     /// the top-level `windows` field only holds whichever account ticked last;
     /// those ticks are stored here so a pane can read its own account.
+    ///
+    /// Claude also records an opaque profile scope per session. When that
+    /// mapping exists, [`Self::windows_for_session`] prefers the profile's
+    /// latest windows over this legacy per-session copy. Agy has no equivalent
+    /// profile identity and keeps using this map.
     #[serde(default)]
     pub session_windows: BTreeMap<String, Vec<UsageWindow>>,
+    /// Opaque Claude profile identity for a session. The value is a SHA-256
+    /// hex digest of the normalized config directory; the raw path is never
+    /// stored.
+    #[serde(default)]
+    pub session_quota_scopes: BTreeMap<String, String>,
+    /// Latest quota windows for a Claude profile scope. Sessions that map to
+    /// the same scope share this canonical reading.
+    #[serde(default)]
+    pub quota_scope_windows: BTreeMap<String, Vec<UsageWindow>>,
     /// Login identity the snapshot was fetched for (Grok `user_id`, Codex
     /// `tokens.account_id`). Used to drop another account's cached quota after
     /// `grok login` / Codex account switch. Absent on snapshots written before
@@ -601,6 +624,8 @@ impl ProviderSnapshot {
             session_models: BTreeMap::new(),
             session_contexts: BTreeMap::new(),
             session_windows: BTreeMap::new(),
+            session_quota_scopes: BTreeMap::new(),
+            quota_scope_windows: BTreeMap::new(),
             account_id: None,
         }
     }
@@ -654,19 +679,33 @@ impl ProviderSnapshot {
     ///
     /// Context and model are session-local, so a known session never falls
     /// back to the provider-level value. Quota is account-level: Grok, Codex,
-    /// and Devin share one login's windows across every pane, and this map
-    /// stays empty for them. StatusLine providers fill the map; a known
-    /// session missing from a non-empty map must not borrow another account's
-    /// numbers. The top-level `windows` field is used when Herdr has no
-    /// session id, or when no session has reported windows yet (legacy cache).
+    /// and Devin share one login's windows across every pane, and the keyed
+    /// maps stay empty for them.
+    ///
+    /// Lookup order:
+    /// 1. No session id → top-level `windows`.
+    /// 2. Session has a Claude profile scope with canonical windows → those.
+    /// 3. Session has legacy `session_windows` → those (Agy, old cache).
+    /// 4. Every keyed map is empty → top-level `windows` (Grok/Codex/Devin
+    ///    and a StatusLine cache written before session maps existed).
+    /// 5. Keyed maps exist but this session is unknown → empty. A missing
+    ///    session must not borrow another account's numbers.
     pub fn windows_for_session(&self, session_id: Option<&str>) -> &[UsageWindow] {
         let Some(session_id) = session_id else {
             return &self.windows;
         };
+        if let Some(scope) = self.session_quota_scopes.get(session_id) {
+            if let Some(windows) = self.quota_scope_windows.get(scope) {
+                return windows;
+            }
+        }
         if let Some(windows) = self.session_windows.get(session_id) {
             return windows;
         }
-        if self.session_windows.is_empty() {
+        if self.session_windows.is_empty()
+            && self.session_quota_scopes.is_empty()
+            && self.quota_scope_windows.is_empty()
+        {
             return &self.windows;
         }
         &[]
@@ -730,15 +769,16 @@ impl ProviderSnapshot {
         windows: &[UsageWindow],
         now_unix: u64,
     ) -> Severity {
+        let live = live_windows(windows, now_unix);
         let relevant = match provider {
-            Provider::Grok => long_window(windows),
+            Provider::Grok => long_window(&live),
             Provider::Codex
             | Provider::Claude
             | Provider::Agy
             | Provider::OpenCodeGo
             | Provider::Omp
             | Provider::Devin => {
-                window_in(windows, WindowKind::FiveHour).or_else(|| long_window(windows))
+                window_in(&live, WindowKind::FiveHour).or_else(|| long_window(&live))
             }
         };
         relevant
@@ -760,6 +800,15 @@ pub(crate) fn window_in(windows: &[UsageWindow], kind: WindowKind) -> Option<&Us
 /// wins, because it is the limit that binds first.
 pub(crate) fn long_window(windows: &[UsageWindow]) -> Option<&UsageWindow> {
     window_in(windows, WindowKind::Weekly).or_else(|| window_in(windows, WindowKind::Monthly))
+}
+
+/// Windows that can still be treated as a live provider reading.
+pub(crate) fn live_windows(windows: &[UsageWindow], now_unix: u64) -> Vec<UsageWindow> {
+    windows
+        .iter()
+        .filter(|window| window.is_current(now_unix))
+        .cloned()
+        .collect()
 }
 
 /// Restore an omitted 5h/weekly window from a previous observation of the
@@ -1410,5 +1459,129 @@ mod tests {
                 .used_percent,
             90.0
         );
+    }
+
+    #[test]
+    fn claude_profile_scope_shares_the_latest_quota_across_sessions() {
+        let mut snapshot = ProviderSnapshot::new(
+            Provider::Claude,
+            vec![quota_window(WindowKind::FiveHour, 92.0, 16_000)],
+            1,
+        );
+        snapshot
+            .session_quota_scopes
+            .insert("session-a".to_string(), "scope-w".to_string());
+        snapshot
+            .session_quota_scopes
+            .insert("session-b".to_string(), "scope-w".to_string());
+        snapshot.session_windows.insert(
+            "session-a".to_string(),
+            vec![quota_window(WindowKind::FiveHour, 5.0, 16_000)],
+        );
+        snapshot.session_windows.insert(
+            "session-b".to_string(),
+            vec![quota_window(WindowKind::FiveHour, 92.0, 16_000)],
+        );
+        snapshot.quota_scope_windows.insert(
+            "scope-w".to_string(),
+            vec![quota_window(WindowKind::FiveHour, 92.0, 16_000)],
+        );
+
+        assert_eq!(
+            snapshot
+                .windows_for_session(Some("session-a"))
+                .first()
+                .unwrap()
+                .used_percent,
+            92.0
+        );
+        assert_eq!(
+            snapshot
+                .windows_for_session(Some("session-b"))
+                .first()
+                .unwrap()
+                .used_percent,
+            92.0
+        );
+    }
+
+    #[test]
+    fn claude_profile_scopes_stay_isolated_when_reset_times_match() {
+        let mut snapshot = ProviderSnapshot::new(
+            Provider::Claude,
+            vec![quota_window(WindowKind::FiveHour, 82.0, 16_000)],
+            1,
+        );
+        snapshot
+            .session_quota_scopes
+            .insert("work".to_string(), "scope-w".to_string());
+        snapshot
+            .session_quota_scopes
+            .insert("personal".to_string(), "scope-p".to_string());
+        snapshot.quota_scope_windows.insert(
+            "scope-w".to_string(),
+            vec![quota_window(WindowKind::FiveHour, 18.0, 16_000)],
+        );
+        snapshot.quota_scope_windows.insert(
+            "scope-p".to_string(),
+            vec![quota_window(WindowKind::FiveHour, 82.0, 16_000)],
+        );
+
+        assert_eq!(
+            snapshot
+                .windows_for_session(Some("work"))
+                .first()
+                .unwrap()
+                .used_percent,
+            18.0
+        );
+        assert_eq!(
+            snapshot
+                .windows_for_session(Some("personal"))
+                .first()
+                .unwrap()
+                .used_percent,
+            82.0
+        );
+        assert!(snapshot.windows_for_session(Some("unknown")).is_empty());
+    }
+
+    #[test]
+    fn legacy_snapshots_deserialize_without_quota_scope_maps() {
+        let snapshot: ProviderSnapshot = serde_json::from_str(
+            r#"{
+                "provider":"claude",
+                "source":"claude-statusline",
+                "fetched_at_unix":1,
+                "windows":[{"kind":"five_hour","used_percent":90.0,"remaining_percent":10.0}],
+                "session_windows":{
+                    "old":[{"kind":"five_hour","used_percent":20.0,"remaining_percent":80.0}]
+                }
+            }"#,
+        )
+        .unwrap();
+        assert!(snapshot.session_quota_scopes.is_empty());
+        assert!(snapshot.quota_scope_windows.is_empty());
+        assert_eq!(
+            snapshot
+                .windows_for_session(Some("old"))
+                .first()
+                .unwrap()
+                .used_percent,
+            20.0
+        );
+        assert!(snapshot.windows_for_session(Some("unknown")).is_empty());
+    }
+
+    #[test]
+    fn an_expired_window_is_not_current() {
+        let live = quota_window(WindowKind::FiveHour, 20.0, 1_001);
+        let expired = quota_window(WindowKind::FiveHour, 20.0, 1_000);
+        assert!(live.is_current(1_000));
+        assert!(!expired.is_current(1_000));
+        assert!(!expired.is_current(1_001));
+        assert!(UsageWindow::new(WindowKind::FiveHour, 20.0, None)
+            .unwrap()
+            .is_current(1_001));
     }
 }

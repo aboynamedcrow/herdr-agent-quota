@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::tempdir;
 
 fn install_herdr_stub(state: &Path, agent_list: &str) -> (PathBuf, PathBuf) {
@@ -30,15 +30,51 @@ fn install_herdr_stub(state: &Path, agent_list: &str) -> (PathBuf, PathBuf) {
     (executable, log)
 }
 
+fn future_reset_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after unix epoch")
+        .as_secs()
+        + 3_600
+}
+
+fn claude_statusline_windows(
+    session_id: &str,
+    five_hour_used: f64,
+    seven_day_used: Option<f64>,
+    reset: u64,
+) -> String {
+    match seven_day_used {
+        Some(week_used) => format!(
+            r#"{{"session_id":"{session_id}","rate_limits":{{"five_hour":{{"used_percentage":{five_hour_used},"resets_at":{reset}}},"seven_day":{{"used_percentage":{week_used},"resets_at":{reset}}}}}}}"#
+        ),
+        None => format!(
+            r#"{{"session_id":"{session_id}","rate_limits":{{"five_hour":{{"used_percentage":{five_hour_used},"resets_at":{reset}}}}}}}"#
+        ),
+    }
+}
+
 fn run_claude_collector(state: &Path, herdr: &Path, input: &[u8]) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_herdr-agent-quota"))
+    run_claude_collector_with_config_dir(state, herdr, input, None);
+}
+
+fn run_claude_collector_with_config_dir(
+    state: &Path,
+    herdr: &Path,
+    input: &[u8],
+    config_dir: Option<&Path>,
+) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_herdr-agent-quota"));
+    command
         .arg("claude-statusline")
         .env("HERDR_PLUGIN_STATE_DIR", state)
         .env("HERDR_BIN_PATH", herdr)
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stdout(Stdio::piped());
+    if let Some(config_dir) = config_dir {
+        command.env("CLAUDE_CONFIG_DIR", config_dir);
+    }
+    let mut child = command.spawn().unwrap();
     child.stdin.take().unwrap().write_all(input).unwrap();
     assert!(child.wait_with_output().unwrap().status.success());
 }
@@ -537,10 +573,14 @@ fn claude_cache_is_published_by_refresh_event() {
         state.path(),
         r#"{"result":{"agents":[{"agent":"claude","pane_id":"w1:p1"}]}}"#,
     );
+    let reset = future_reset_unix();
     run_claude_collector(
         state.path(),
         &herdr_stub,
-        include_bytes!("fixtures/claude/statusline-both.json"),
+        format!(
+            r#"{{"rate_limits":{{"five_hour":{{"used_percentage":58.0,"resets_at":{reset}}},"seven_day":{{"used_percentage":27.0,"resets_at":{reset}}}}}}}"#
+        )
+        .as_bytes(),
     );
     assert!(!herdr_log.exists());
 
@@ -555,6 +595,9 @@ fn claude_cache_is_published_by_refresh_event() {
 
 #[test]
 fn claude_statusline_without_rate_limits_clears_stale_quota_windows() {
+    // A payload with no session id still clears the top-level `windows`
+    // snapshot. Profile-scoped canonical quota is a different path: an empty
+    // rate_limits payload on a *new* session must not wipe the account.
     let state = tempdir().unwrap();
     let (herdr_stub, _herdr_log) = install_herdr_stub(
         state.path(),
@@ -610,11 +653,17 @@ fn statusline_without_context_keeps_the_last_context_snapshot() {
 
 #[test]
 fn concurrent_claude_accounts_keep_their_own_quota_windows() {
-    // Two Claude panes signed in to different accounts (for example a work
-    // and a personal login in separate CLAUDE_CONFIG_DIR checkouts) each send
-    // their own statusLine ticks. Sidebar percentages are remaining, not used:
-    // work 18%/10% used → 82%/90% remaining; personal 82%/90% used → 18%/10%.
+    // Two Claude panes signed in to different accounts (a work and a personal
+    // login in separate CLAUDE_CONFIG_DIR profiles) each send their own
+    // statusLine ticks. Matching reset boundaries are not an identity: both
+    // windows reset at the same unix second and must still stay isolated.
+    // Sidebar percentages are remaining, not used: work 18%/10% used →
+    // 82%/90% remaining; personal 82%/90% used → 18%/10%.
     let state = tempdir().unwrap();
+    let work_config = state.path().join("claude-work");
+    let personal_config = state.path().join("claude-personal");
+    fs::create_dir_all(&work_config).unwrap();
+    fs::create_dir_all(&personal_config).unwrap();
     let (herdr_stub, herdr_log) = install_herdr_stub(
         state.path(),
         r#"{"result":{"agents":[
@@ -622,31 +671,22 @@ fn concurrent_claude_accounts_keep_their_own_quota_windows() {
             {"agent":"claude","pane_id":"w2:p1","agent_session":{"value":"personal-session"}}
         ]}}"#,
     );
-    run_claude_collector(
+    let reset = future_reset_unix();
+    run_claude_collector_with_config_dir(
         state.path(),
         &herdr_stub,
-        br#"{
-            "session_id": "work-session",
-            "rate_limits": {
-                "five_hour": {"used_percentage": 18.0},
-                "seven_day": {"used_percentage": 10.0}
-            }
-        }"#,
+        claude_statusline_windows("work-session", 18.0, Some(10.0), reset).as_bytes(),
+        Some(&work_config),
     );
-    run_claude_collector(
+    run_claude_collector_with_config_dir(
         state.path(),
         &herdr_stub,
-        br#"{
-            "session_id": "personal-session",
-            "rate_limits": {
-                "five_hour": {"used_percentage": 82.0},
-                "seven_day": {"used_percentage": 90.0}
-            }
-        }"#,
+        claude_statusline_windows("personal-session", 82.0, Some(90.0), reset).as_bytes(),
+        Some(&personal_config),
     );
 
     run_claude_refresh(state.path(), &herdr_stub);
-    let report = fs::read_to_string(herdr_log).unwrap();
+    let report = fs::read_to_string(&herdr_log).unwrap();
     let work_report = report
         .lines()
         .find(|line| line.contains("w1:p1"))
@@ -671,6 +711,154 @@ fn concurrent_claude_accounts_keep_their_own_quota_windows() {
         personal_report.contains("quota_week_danger=7d 10%"),
         "{personal_report}"
     );
+
+    let observation =
+        fs::read_to_string(state.path().join("claude-statusline.observation.json")).unwrap();
+    assert!(
+        !observation.contains(work_config.to_str().unwrap()),
+        "cache must not store the raw Claude config path"
+    );
+    assert!(
+        !observation.contains(personal_config.to_str().unwrap()),
+        "cache must not store the raw Claude config path"
+    );
+}
+
+#[test]
+fn claude_panes_on_the_same_profile_share_the_newest_quota() {
+    let state = tempdir().unwrap();
+    let profile = state.path().join("claude-profile");
+    fs::create_dir_all(&profile).unwrap();
+    let (herdr_stub, herdr_log) = install_herdr_stub(
+        state.path(),
+        r#"{"result":{"agents":[
+            {"agent":"claude","pane_id":"w1:p1","agent_session":{"value":"session-c"}},
+            {"agent":"claude","pane_id":"w2:p1","agent_session":{"value":"session-a"}}
+        ]}}"#,
+    );
+    let reset = future_reset_unix();
+    run_claude_collector_with_config_dir(
+        state.path(),
+        &herdr_stub,
+        claude_statusline_windows("session-c", 5.0, None, reset).as_bytes(),
+        Some(&profile),
+    );
+    run_claude_collector_with_config_dir(
+        state.path(),
+        &herdr_stub,
+        claude_statusline_windows("session-a", 92.0, None, reset).as_bytes(),
+        Some(&profile),
+    );
+
+    run_claude_refresh(state.path(), &herdr_stub);
+    let report = fs::read_to_string(herdr_log).unwrap();
+    let idle_report = report
+        .lines()
+        .find(|line| line.contains("w1:p1"))
+        .expect("idle pane reported");
+    let live_report = report
+        .lines()
+        .find(|line| line.contains("w2:p1"))
+        .expect("live pane reported");
+    assert!(
+        idle_report.contains("quota_5h_danger=5h 8%"),
+        "{idle_report}"
+    );
+    assert!(
+        live_report.contains("quota_5h_danger=5h 8%"),
+        "{live_report}"
+    );
+}
+
+#[test]
+fn idle_claude_statusline_tick_does_not_regress_shared_profile_quota() {
+    let state = tempdir().unwrap();
+    let profile = state.path().join("claude-profile");
+    fs::create_dir_all(&profile).unwrap();
+    let (herdr_stub, herdr_log) = install_herdr_stub(
+        state.path(),
+        r#"{"result":{"agents":[
+            {"agent":"claude","pane_id":"w1:p1","agent_session":{"value":"session-c"}},
+            {"agent":"claude","pane_id":"w2:p1","agent_session":{"value":"session-a"}}
+        ]}}"#,
+    );
+    let reset = future_reset_unix();
+    run_claude_collector_with_config_dir(
+        state.path(),
+        &herdr_stub,
+        claude_statusline_windows("session-c", 5.0, None, reset).as_bytes(),
+        Some(&profile),
+    );
+    run_claude_collector_with_config_dir(
+        state.path(),
+        &herdr_stub,
+        claude_statusline_windows("session-a", 92.0, None, reset).as_bytes(),
+        Some(&profile),
+    );
+    run_claude_collector_with_config_dir(
+        state.path(),
+        &herdr_stub,
+        claude_statusline_windows("session-c", 5.0, None, reset).as_bytes(),
+        Some(&profile),
+    );
+
+    run_claude_refresh(state.path(), &herdr_stub);
+    let report = fs::read_to_string(herdr_log).unwrap();
+    let idle_report = report
+        .lines()
+        .find(|line| line.contains("w1:p1"))
+        .expect("idle pane reported");
+    let live_report = report
+        .lines()
+        .find(|line| line.contains("w2:p1"))
+        .expect("live pane reported");
+    assert!(
+        idle_report.contains("quota_5h_danger=5h 8%"),
+        "{idle_report}"
+    );
+    assert!(
+        live_report.contains("quota_5h_danger=5h 8%"),
+        "{live_report}"
+    );
+}
+
+#[test]
+fn claude_new_session_without_rate_limits_keeps_profile_quota() {
+    let state = tempdir().unwrap();
+    let profile = state.path().join("claude-profile");
+    fs::create_dir_all(&profile).unwrap();
+    let (herdr_stub, herdr_log) = install_herdr_stub(
+        state.path(),
+        r#"{"result":{"agents":[
+            {"agent":"claude","pane_id":"w1:p1","agent_session":{"value":"session-a"}},
+            {"agent":"claude","pane_id":"w2:p1","agent_session":{"value":"session-b"}}
+        ]}}"#,
+    );
+    run_claude_collector_with_config_dir(
+        state.path(),
+        &herdr_stub,
+        claude_statusline_windows("session-a", 18.0, None, future_reset_unix()).as_bytes(),
+        Some(&profile),
+    );
+    run_claude_collector_with_config_dir(
+        state.path(),
+        &herdr_stub,
+        br#"{"session_id":"session-b"}"#,
+        Some(&profile),
+    );
+
+    run_claude_refresh(state.path(), &herdr_stub);
+    let report = fs::read_to_string(herdr_log).unwrap();
+    let session_a = report
+        .lines()
+        .find(|line| line.contains("w1:p1"))
+        .expect("session A reported");
+    let session_b = report
+        .lines()
+        .find(|line| line.contains("w2:p1"))
+        .expect("session B reported");
+    assert!(session_a.contains("quota_5h_normal=5h 82%"), "{session_a}");
+    assert!(session_b.contains("quota_5h_normal=5h 82%"), "{session_b}");
 }
 
 #[test]
