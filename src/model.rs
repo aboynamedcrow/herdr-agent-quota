@@ -124,6 +124,8 @@ impl CredentialScope {
     pub const CANONICAL: Self = Self("canonical");
     /// OpenCode default data store (`$XDG_DATA_HOME/opencode` or `~/.local/share/opencode`).
     pub const OPENCODE_STORE: Self = Self("opencode-store");
+    /// Native Codex account homes, isolated from the canonical collector.
+    pub const CODEX_ACCOUNT: Self = Self("codex-account");
     /// omp's own credential store (`<agent dir>/agent.db`). An omp pane is
     /// billed to a subscription this plugin can also collect canonically, so
     /// the scope is what keeps the two apart.
@@ -162,6 +164,19 @@ impl BillingTarget {
         }
     }
 
+    /// Stable per-home storage: token rotation must not create orphan files.
+    /// The snapshot and refresh marker validate the current generation.
+    pub fn codex_account(home: &std::path::Path) -> Self {
+        let mut hash = Sha256::new();
+        hash.update(b"codex-home-v1\0");
+        hash.update(home.as_os_str().as_encoded_bytes());
+        Self {
+            billing: Provider::Codex,
+            credential_scope: CredentialScope::CODEX_ACCOUNT,
+            scope_hash: Some(hash.finalize().into()),
+        }
+    }
+
     /// An omp-scoped target for a subscription omp routes a pane to.
     pub fn omp(provider_id: &str) -> Self {
         Self {
@@ -187,7 +202,7 @@ impl BillingTarget {
     /// ids, and a scoped target carries its credential scope in the stem so it
     /// cannot collide with them.
     pub fn cache_identity(self) -> String {
-        if self.credential_scope == CredentialScope::OMP_STORE {
+        if self.scope_hash.is_some() {
             let discriminator = self
                 .scope_hash
                 .map(|hash| {
@@ -569,6 +584,10 @@ pub struct ProviderSnapshot {
     /// this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+    /// Opaque generation stamp for native Codex's stable per-home cache.
+    /// Missing stamps cannot be used by the scoped Codex collector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_generation: Option<String>,
 }
 
 impl ProviderSnapshot {
@@ -585,6 +604,7 @@ impl ProviderSnapshot {
             session_contexts: BTreeMap::new(),
             session_windows: BTreeMap::new(),
             account_id: None,
+            credential_generation: None,
         }
     }
 

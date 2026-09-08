@@ -151,6 +151,8 @@ pub struct PaneTokens {
     pub quota: PaneQuotaUpdate,
     pub identity: Option<PaneIdentity>,
     pub context: Option<ContextUsage>,
+    /// Internal warning continuity; never a pane metadata token.
+    pub notification_key: Option<String>,
 }
 
 /// Show one Herdr notification.

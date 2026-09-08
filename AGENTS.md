@@ -172,10 +172,12 @@ bearing:
 
 **Low quota notifications** fire from both publish paths (`publish_resolved`
 and `handle_named_pane`) so a warning lands at the end of the turn that spent
-the quota. The state is a set of provider names, not a timestamp: a provider
-stays quiet while it stays low and is re-armed only by recovering above the
-threshold. A provider with **no pane in the pass keeps its entry** — dropping
-it would make closing and reopening a pane a way to be warned twice.
+the quota. State remembers native Codex by canonical home/account identity,
+stable across token rotation; other collectors retain provider-name identity.
+Each identity stays quiet while low and is re-armed only by an observed recovery
+above the threshold. Another account's healthy quota is not recovery. An
+identity with **no available quota in the pass keeps its entry** — dropping it
+would make closing/reopening a pane or a failed identity read repeat a warning.
 
 ## A plugin action cannot see the caller's environment
 

@@ -142,6 +142,29 @@ fn parse_reset(value: &Value) -> Option<ResetAt> {
 /// the refresh path supplies pane session ids so an older pane is not lost
 /// behind the bounded `thread/list` page.
 pub fn fetch_for_sessions(session_ids: &[String]) -> Result<ProviderSnapshot> {
+    fetch_process(session_ids, None)
+}
+
+pub fn fetch_for_account(
+    account: &crate::codex_accounts::CodexAccount,
+    session_ids: &[String],
+) -> Result<ProviderSnapshot> {
+    anyhow::ensure!(
+        account.is_current(),
+        "Codex account identity changed before collection"
+    );
+    let snapshot = fetch_process(session_ids, Some(account))?;
+    anyhow::ensure!(
+        account.is_current(),
+        "Codex account identity changed during collection"
+    );
+    Ok(snapshot)
+}
+
+fn fetch_process(
+    session_ids: &[String],
+    account: Option<&crate::codex_accounts::CodexAccount>,
+) -> Result<ProviderSnapshot> {
     let executable = std::env::var_os("CODEX_BIN_PATH").unwrap_or_else(|| "codex".into());
     let mut command = Command::new(executable);
     command
@@ -149,6 +172,13 @@ pub fn fetch_for_sessions(session_ids: &[String]) -> Result<ProviderSnapshot> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    if let Some(account) = account {
+        command
+            .env("CODEX_HOME", &account.home)
+            .env_remove("CODEX_AUTH_FILE")
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("CODEX_API_KEY");
+    }
     #[cfg(unix)]
     unsafe {
         command.pre_exec(|| {
@@ -176,7 +206,7 @@ pub fn fetch_for_sessions(session_ids: &[String]) -> Result<ProviderSnapshot> {
         terminate(&watchdog);
     });
 
-    let result = fetch_from_process(&mut input, &mut output, session_ids);
+    let result = fetch_from_process(&mut input, &mut output, session_ids, account);
     terminate(&child);
     result
 }
@@ -206,6 +236,7 @@ fn fetch_from_process(
     input: &mut ChildStdin,
     output: &mut BufReader<impl std::io::Read>,
     requested_session_ids: &[String],
+    scoped_account: Option<&crate::codex_accounts::CodexAccount>,
 ) -> Result<ProviderSnapshot> {
     write_rpc(
         input,
@@ -231,6 +262,24 @@ fn fetch_from_process(
     let limits = read_rpc(output, 3)?;
     let mut snapshot =
         parse_rate_limits(&limits, CacheStore::now_unix()).map_err(anyhow::Error::from)?;
+    if let Some(scoped) = scoped_account {
+        anyhow::ensure!(
+            account_id_from_rpc(&account).is_none_or(|id| id == scoped.account_id),
+            "Codex app-server account does not match the pane account"
+        );
+        snapshot.account_id = Some(scoped.account_id.clone());
+        snapshot.credential_generation = Some(scoped.generation());
+        // Only sessions in this pass are eligible for local diagnostics. Do
+        // not enumerate thread previews or enrich unrelated account sessions.
+        enrich_local_sessions_with_quota_policy(
+            &mut snapshot,
+            &scoped.home,
+            requested_session_ids,
+            CacheStore::file_mtime_unix(&scoped.home.join("auth.json")),
+            false,
+        );
+        return Ok(snapshot);
+    }
     snapshot.account_id = current_account_id().or_else(|| account_id_from_rpc(&account));
 
     // Session previews come from Codex's local state database. This is one
@@ -294,6 +343,16 @@ fn enrich_local_sessions_at(
     session_ids: &[String],
     auth_mtime_unix: Option<u64>,
 ) {
+    enrich_local_sessions_with_quota_policy(snapshot, home, session_ids, auth_mtime_unix, true);
+}
+
+fn enrich_local_sessions_with_quota_policy(
+    snapshot: &mut ProviderSnapshot,
+    home: &Path,
+    session_ids: &[String],
+    auth_mtime_unix: Option<u64>,
+    allow_rollout_quota: bool,
+) {
     if session_ids.is_empty() {
         return;
     }
@@ -315,14 +374,16 @@ fn enrich_local_sessions_at(
             .ok()
             .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or(0, |duration| duration.as_secs());
-        if rollout_windows_can_fill_account_quota(
-            snapshot,
-            &observation.windows,
-            modified,
-            auth_mtime_unix,
-        ) && newest_windows
-            .as_ref()
-            .is_none_or(|(current, _)| modified >= *current)
+        if allow_rollout_quota
+            && rollout_windows_can_fill_account_quota(
+                snapshot,
+                &observation.windows,
+                modified,
+                auth_mtime_unix,
+            )
+            && newest_windows
+                .as_ref()
+                .is_none_or(|(current, _)| modified >= *current)
         {
             newest_windows = Some((modified, observation.windows));
         }
@@ -375,19 +436,39 @@ fn rollout_windows_can_fill_account_quota(
 }
 
 fn find_rollout_paths(home: &Path, session_ids: &[String]) -> BTreeMap<String, PathBuf> {
-    let mut directories = vec![home.join("sessions"), home.join("archived_sessions")];
+    let Ok(home) = home.canonicalize() else {
+        return BTreeMap::new();
+    };
+    let mut directories = vec![
+        (home.join("sessions"), 0),
+        (home.join("archived_sessions"), 0),
+    ];
+    let mut remaining = 100_000usize;
     let mut newest = BTreeMap::<String, (u64, PathBuf)>::new();
-    while let Some(directory) = directories.pop() {
+    while let Some((directory, depth)) = directories.pop() {
+        if depth > 8 {
+            return BTreeMap::new();
+        }
+        if !directory
+            .canonicalize()
+            .is_ok_and(|path| path.starts_with(&home))
+        {
+            continue;
+        }
         let Ok(entries) = fs::read_dir(directory) else {
             continue;
         };
         for entry in entries.flatten() {
+            let Some(left) = remaining.checked_sub(1) else {
+                return BTreeMap::new();
+            };
+            remaining = left;
             let path = entry.path();
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
             if file_type.is_dir() {
-                directories.push(path);
+                directories.push((path, depth + 1));
                 continue;
             }
             if !file_type.is_file()
@@ -399,7 +480,7 @@ fn find_rollout_paths(home: &Path, session_ids: &[String]) -> BTreeMap<String, P
             let name = name.to_string_lossy();
             let matching_ids = session_ids
                 .iter()
-                .filter(|session_id| name.contains(session_id.as_str()));
+                .filter(|session_id| name.ends_with(&format!("-{session_id}.jsonl")));
             let modified = entry
                 .metadata()
                 .ok()
@@ -434,7 +515,10 @@ fn read_rollout_observation(path: &Path, session_id: &str) -> Option<RolloutObse
     let start = length.saturating_sub(ROLLOUT_TAIL_BYTES);
     file.seek(SeekFrom::Start(start)).ok()?;
     let mut bytes = Vec::with_capacity((length - start) as usize);
-    file.read_to_end(&mut bytes).ok()?;
+    Read::by_ref(&mut file)
+        .take(ROLLOUT_TAIL_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
     let text = String::from_utf8_lossy(&bytes);
     let text = if start == 0 {
         text.into_owned()
@@ -646,9 +730,13 @@ fn write_notification(input: &mut ChildStdin, method: &str, params: Value) -> Re
 
 fn read_rpc(output: &mut BufReader<impl std::io::Read>, expected_id: u64) -> Result<Value> {
     let mut line = String::new();
-    loop {
+    // The watchdog bounds time; these limits also bound a noisy child's bytes.
+    for _ in 0..256 {
         line.clear();
-        let count = output.read_line(&mut line)?;
+        let count = Read::by_ref(output)
+            .take(1024 * 1024)
+            .read_line(&mut line)?;
+        anyhow::ensure!(count < 1024 * 1024, "Codex app-server response too large");
         if count == 0 {
             anyhow::bail!("Codex app-server exited before response {expected_id}");
         }
@@ -663,6 +751,7 @@ fn read_rpc(output: &mut BufReader<impl std::io::Read>, expected_id: u64) -> Res
         }
         return Ok(value);
     }
+    anyhow::bail!("Codex app-server response limit exceeded")
 }
 
 pub fn auth_path() -> Result<PathBuf> {
@@ -672,12 +761,12 @@ pub fn auth_path() -> Result<PathBuf> {
     Ok(codex_home()?.join("auth.json"))
 }
 
-fn codex_home() -> Result<PathBuf> {
+pub(crate) fn codex_home() -> Result<PathBuf> {
+    if let Some(home) = std::env::var_os("CODEX_HOME") {
+        return Ok(PathBuf::from(home));
+    }
     let home = std::env::var_os("HOME").context("HOME is not set")?;
-    let home = PathBuf::from(home);
-    Ok(std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".codex")))
+    Ok(PathBuf::from(home).join(".codex"))
 }
 
 pub fn current_account_id() -> Option<String> {
@@ -692,6 +781,7 @@ pub fn account_id_from_auth(path: &Path) -> Option<String> {
     #[derive(Deserialize)]
     struct AuthMetadata {
         tokens: Option<TokenMetadata>,
+        auth_mode: Option<String>,
     }
 
     #[derive(Deserialize)]
@@ -704,8 +794,19 @@ pub fn account_id_from_auth(path: &Path) -> Option<String> {
 
     // Only materialize the stable account id. Token fields are ignored by the
     // streaming deserializer and never enter an owned Rust value.
+    if !fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
     let metadata: AuthMetadata =
-        serde_json::from_reader(BufReader::new(fs::File::open(path).ok()?)).ok()?;
+        serde_json::from_reader(BufReader::new(fs::File::open(path).ok()?.take(1024 * 1024)))
+            .ok()?;
+    if metadata
+        .auth_mode
+        .as_deref()
+        .is_some_and(|mode| mode != "chatgpt")
+    {
+        return None;
+    }
     let tokens = metadata.tokens?;
     tokens
         .account_id

@@ -25,7 +25,7 @@ const FIELDS_FILE: &str = "fields";
 const BRAND_COLORS_FILE: &str = "brand-colors";
 const AGENT_ORDER_FILE: &str = "agent-order";
 const LOW_QUOTA_ALERT_FILE: &str = "low-quota-alert";
-/// One line per provider that is currently below the alert threshold, so a
+/// One line per account/provider identity below the alert threshold, so a
 /// crossing notifies once instead of on every refresh.
 const LOW_QUOTA_ALERTED_FILE: &str = "low-quota-alerted";
 const MAX_STATUSLINE_SESSIONS: usize = 128;
@@ -128,6 +128,40 @@ impl CacheStore {
         .context("write refresh marker")
     }
 
+    /// Native Codex keeps a stable home path but debounces only the same
+    /// credential generation, including failed attempts with no snapshot.
+    pub fn should_debounce_codex_generation(
+        &self,
+        target: &BillingTarget,
+        generation: &str,
+        now_unix: u64,
+    ) -> bool {
+        let Ok(contents) = fs::read_to_string(self.target_refresh_marker_path(target)) else {
+            return false;
+        };
+        let Some((last, stored_generation)) = contents.split_once('\n') else {
+            return false;
+        };
+        stored_generation == generation
+            && last
+                .parse::<u64>()
+                .is_ok_and(|last| now_unix.saturating_sub(last) < 60)
+    }
+
+    pub fn mark_refresh_codex_generation(
+        &self,
+        target: &BillingTarget,
+        generation: &str,
+        now_unix: u64,
+    ) -> Result<()> {
+        self.ensure()?;
+        fs::write(
+            self.target_refresh_marker_path(target),
+            format!("{now_unix}\n{generation}"),
+        )
+        .context("write Codex refresh generation")
+    }
+
     pub fn save(&self, snapshot: &ProviderSnapshot) -> Result<()> {
         self.ensure()?;
         let destination = self.snapshot_path(snapshot.provider);
@@ -160,9 +194,41 @@ impl CacheStore {
         session_ids: &[String],
         credentials_mtime_unix: Option<u64>,
     ) -> Result<()> {
-        if let Some(previous) = self.load(snapshot.provider).ok().flatten() {
-            let same_account =
-                previous.usable_for_account(snapshot.account_id.as_deref(), credentials_mtime_unix);
+        Self::preserve_diagnostics(
+            snapshot,
+            self.load(snapshot.provider).ok().flatten(),
+            session_ids,
+            credentials_mtime_unix,
+        );
+        self.save(snapshot)
+    }
+
+    pub fn save_target_preserving_diagnostics(
+        &self,
+        target: &BillingTarget,
+        snapshot: &mut ProviderSnapshot,
+        session_ids: &[String],
+        credentials_mtime_unix: Option<u64>,
+    ) -> Result<()> {
+        Self::preserve_diagnostics(
+            snapshot,
+            self.load_target(target).ok().flatten(),
+            session_ids,
+            credentials_mtime_unix,
+        );
+        self.save_target(target, snapshot)
+    }
+
+    fn preserve_diagnostics(
+        snapshot: &mut ProviderSnapshot,
+        previous: Option<ProviderSnapshot>,
+        session_ids: &[String],
+        credentials_mtime_unix: Option<u64>,
+    ) {
+        if let Some(previous) = previous {
+            let same_account = previous.credential_generation == snapshot.credential_generation
+                && previous
+                    .usable_for_account(snapshot.account_id.as_deref(), credentials_mtime_unix);
             if same_account {
                 snapshot.merge_omitted_windows(&previous);
                 // A refresh scoped to one pane's session still must not delete
@@ -194,7 +260,6 @@ impl CacheStore {
             }
         }
         prune_session_diagnostics(snapshot, session_ids);
-        self.save(snapshot)
     }
 
     /// Store the latest statusLine observation without coordinating with a
@@ -613,7 +678,7 @@ impl CacheStore {
         Ok(())
     }
 
-    /// Providers that have already been notified and have not recovered above
+    /// Account/provider identities already notified that have not recovered above
     /// the threshold since.
     ///
     /// Kept as a set rather than a timestamp so a quota that stays low stays
