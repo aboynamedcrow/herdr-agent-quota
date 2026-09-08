@@ -101,7 +101,7 @@ herdr plugin action invoke refresh --plugin herdr-agent-quota
 | Context | Used percentage of the active model's context window. |
 | Cache | Session cache hit rate when the agent exposes trustworthy counters. |
 | Cache TTL | Recorded expiry when available; `ttl≈` marks a documented estimate. |
-| Quota | Remaining or used percentage plus reset ETA, scoped to the serving account. |
+| Quota | Remaining or used percentage plus reset ETA, using the account source described below. |
 | Headroom | Tightest visible quota, used by optional sorting and notifications. |
 
 | Agent | Quota support | Session diagnostics |
@@ -114,6 +114,9 @@ herdr plugin action invoke refresh --plugin herdr-agent-quota
 | Pi | Canonical Codex quota on an exact account match | model, context, cache, supported TTL data |
 | omp (oh-my-pi) | OMP-normalized windows such as `5h`, `1d`, `7d`, `Monthly` | model, context, cache, supported TTL data |
 | Devin CLI | 1d + 7d | Per-session model from `~/.local/share/devin/cli/sessions.db` (`id`, `model`), mapped through local `devin-models.json`. A session not in the DB uses `config.json` `agent.model`. Not the API `planName`. |
+
+Codex quota follows the current login in the plugin's `CODEX_HOME`, not a
+separate account per pane. Session files supply model/context/cache only.
 
 OMP is a generic adapter, not a second set of provider adapters. The plugin runs
 `omp usage --json --provider <id>`, retains OMP's window labels, and attributes

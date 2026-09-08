@@ -14,7 +14,7 @@ use crate::providers::statusline::enrich_cache_session;
 use crate::providers::{codex, devin, grok, omp as omp_provider, opencode_go};
 use crate::route;
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::process::{Command, Stdio};
@@ -26,6 +26,46 @@ use std::os::unix::process::CommandExt;
 
 const MAX_ACTIVE_TURN_WATCH: Duration = Duration::from_secs(60 * 60);
 const TURN_WATCH_LOCK: &str = "turn.lock";
+const WATCH_HERDR_ENV: &str = "watch-herdr.json";
+
+/// A detached watcher outlives the server that supplied its environment.
+/// Server-owned entry points record only connection fields, never credentials.
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+struct WatchHerdrEnvironment {
+    binary: Option<std::path::PathBuf>,
+    socket: Option<std::path::PathBuf>,
+}
+
+impl WatchHerdrEnvironment {
+    fn current() -> Self {
+        Self {
+            binary: std::env::var_os("HERDR_BIN_PATH").map(Into::into),
+            socket: std::env::var_os("HERDR_SOCKET_PATH").map(Into::into),
+        }
+    }
+
+    fn save(&self, cache: &CacheStore) -> Result<()> {
+        // A direct invocation without Herdr's environment cannot describe
+        // the server and must not replace its recorded connection.
+        if self.binary.is_none() || self.socket.is_none() {
+            return Ok(());
+        }
+        if Self::load(cache).as_ref() == Some(self) {
+            return Ok(());
+        }
+        cache.ensure()?;
+        let temporary = cache
+            .root()
+            .join(format!(".{WATCH_HERDR_ENV}.{}.tmp", std::process::id()));
+        std::fs::write(&temporary, serde_json::to_vec(self)?)?;
+        std::fs::rename(temporary, cache.root().join(WATCH_HERDR_ENV))?;
+        Ok(())
+    }
+
+    fn load(cache: &CacheStore) -> Option<Self> {
+        serde_json::from_slice(&std::fs::read(cache.root().join(WATCH_HERDR_ENV)).ok()?).ok()
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct ProviderOutcome {
@@ -51,7 +91,10 @@ pub fn startup(providers: &[Provider]) -> Result<()> {
             crate::configure::apply_agent_order(order);
         }
     }
-    run(providers, false, false)
+    // Handoff need not emit another idle -> working event. An existing
+    // watcher adopts the saved environment; otherwise this starts one.
+    run(providers, false, false)?;
+    spawn_watch()
 }
 
 /// Refresh selected providers until their agents leave the working state.
@@ -83,9 +126,13 @@ pub fn watch(providers: &[Provider], interval_seconds: Option<u64>) -> Result<()
         if cache.turn_watchers_stopped_after(started_millis)? {
             break;
         }
-        if watch_binary_is_newer(started_at, current_exe_modified()) {
+        let server = WatchHerdrEnvironment::load(&cache);
+        let server_changed = server
+            .as_ref()
+            .is_some_and(|server| *server != WatchHerdrEnvironment::current());
+        if server_changed || watch_binary_is_newer(started_at, current_exe_modified()) {
             drop(_lock);
-            return reexec_watch();
+            return reexec_watch(server.as_ref(), interval_seconds);
         }
         // A transient Herdr failure should not terminate a live watcher; the
         // one-hour cap below still prevents an orphaned process. The next
@@ -145,6 +192,7 @@ fn run_internal(
     topic_pane: Option<&str>,
 ) -> Result<()> {
     let cache = CacheStore::from_env()?;
+    WatchHerdrEnvironment::current().save(&cache)?;
     // Agent inventory is metadata-only. Reusing it for both the fetch and the
     // publish pass lets local Codex/Grok diagnostics target the exact pane
     // sessions without adding another Herdr call or reading any pane output.
@@ -240,6 +288,7 @@ fn named_pane(pane_id: &str, harness: Harness) -> Result<Option<AgentPane>> {
 }
 
 fn handle_named_pane(cache: &CacheStore, pane: AgentPane, topic_pane: Option<&str>) -> Result<()> {
+    WatchHerdrEnvironment::current().save(cache)?;
     let mut panes = [pane];
     if topic_pane == Some(panes[0].pane_id.as_str()) {
         refresh_pane_topic(&mut panes[0]);
@@ -835,10 +884,28 @@ fn watch_binary_is_newer(started: SystemTime, modified: Option<SystemTime>) -> b
     modified.is_some_and(|mtime| mtime > started)
 }
 
-fn reexec_watch() -> Result<()> {
+fn reexec_watch(server: Option<&WatchHerdrEnvironment>, interval_seconds: u64) -> Result<()> {
     let executable = std::env::current_exe().context("resolve plugin executable")?;
     let mut command = Command::new(executable);
-    command.args(["watch", "--provider", "all"]);
+    command.args([
+        "watch",
+        "--provider",
+        "all",
+        "--interval-seconds",
+        &interval_seconds.to_string(),
+    ]);
+    if let Some(server) = server {
+        for (name, value) in [
+            ("HERDR_BIN_PATH", &server.binary),
+            ("HERDR_SOCKET_PATH", &server.socket),
+        ] {
+            if let Some(value) = value {
+                command.env(name, value);
+            } else {
+                command.env_remove(name);
+            }
+        }
+    }
     #[cfg(unix)]
     {
         let error = command.exec();
