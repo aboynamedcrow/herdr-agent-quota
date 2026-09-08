@@ -23,6 +23,14 @@ pub struct GrokCredentials {
     pub user_id: Option<String>,
 }
 
+impl GrokCredentials {
+    pub fn account_id(&self) -> String {
+        self.user_id
+            .clone()
+            .unwrap_or_else(|| super::credential_id(&self.key))
+    }
+}
+
 /// Fetch Grok billing and enrich only the visible pane sessions when Herdr
 /// provides their ids. Direct CLI refreshes pass an empty slice and use the
 /// bounded newest-session fallback instead.
@@ -52,7 +60,7 @@ pub fn fetch_for_sessions(session_ids: &[String]) -> Result<ProviderSnapshot> {
     let mut snapshot =
         parse_billing_response(&value, CacheStore::now_unix()).map_err(anyhow::Error::from)?;
     enrich_local_sessions(&mut snapshot, session_ids);
-    Ok(snapshot.with_account_id(credentials.user_id.clone()))
+    Ok(snapshot.with_account_id(Some(credentials.account_id())))
 }
 
 pub fn auth_path() -> Result<PathBuf> {

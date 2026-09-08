@@ -13,7 +13,8 @@ fn main() -> Result<()> {
         Command::Watch {
             provider,
             interval_seconds,
-        } => herdr_agent_quota::refresh::watch(&provider.providers(), interval_seconds),
+            defer,
+        } => herdr_agent_quota::refresh::watch(&provider.providers(), interval_seconds, defer),
         Command::Startup { provider } => herdr_agent_quota::refresh::startup(&provider.providers()),
         Command::Event => herdr_agent_quota::refresh::event(),
         Command::Focus => herdr_agent_quota::refresh::focus(),

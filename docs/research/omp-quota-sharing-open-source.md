@@ -1,5 +1,7 @@
 # OMP/Claude 订阅额度与开源实现研究
 
+> Historical research, valid as of the date below. For current behavior and upgrade instructions, see the [README](../../README.md).
+
 > 研究日期：2026-09-01（Asia/Shanghai）  
 > 目标：确认本仓库引用的 OMP（oh-my-pi/`omp`）如何表示额度，以及额度是否按“厂商”共享；再用其他开源项目交叉核对 Claude/Codex 的获取和展示方式。  
 > 方法：研究步骤只读上游源码与项目文档；没有读取任何 `agent.db`、OAuth token 或凭据文件。

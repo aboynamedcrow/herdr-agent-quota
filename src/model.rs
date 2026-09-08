@@ -556,6 +556,11 @@ impl CacheUsage {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderSnapshot {
+    /// StatusLine quota has no serving-account proof and is session-local.
+    /// False on old caches so they can be refreshed without trusting shared
+    /// profile windows from an earlier plugin version.
+    #[serde(default)]
+    pub session_quota_only: bool,
     pub provider: Provider,
     pub source: String,
     pub fetched_at_unix: u64,
@@ -580,27 +585,17 @@ pub struct ProviderSnapshot {
     /// pane's local rollout usage.
     #[serde(default)]
     pub session_contexts: BTreeMap<String, ContextUsage>,
-    /// Account quota windows keyed by the provider's session id.
-    ///
-    /// Quota itself is account-level for every provider. Grok and Codex fetch
-    /// one login's windows and leave this map empty. StatusLine providers
-    /// (Claude, Agy) can run two signed-in accounts into one cache file, and
-    /// the top-level `windows` field only holds whichever account ticked last;
-    /// those ticks are stored here so a pane can read its own account.
-    ///
-    /// Claude also records an opaque profile scope per session. When that
-    /// mapping exists, [`Self::windows_for_session`] prefers the profile's
-    /// latest windows over this legacy per-session copy. Agy has no equivalent
-    /// profile identity and keeps using this map.
+    /// StatusLine quota observations keyed by the exact provider session ID.
+    /// Direct API collectors leave this map empty. Current Claude/Agy
+    /// snapshots set `session_quota_only` and never share these observations
+    /// across sessions, because StatusLine does not prove account identity.
     #[serde(default)]
     pub session_windows: BTreeMap<String, Vec<UsageWindow>>,
-    /// Opaque Claude profile identity for a session. The value is a SHA-256
-    /// hex digest of the normalized config directory; the raw path is never
-    /// stored.
+    /// Legacy Claude profile digests retained for cache format compatibility.
+    /// Current session-local observations clear this map during migration.
     #[serde(default)]
     pub session_quota_scopes: BTreeMap<String, String>,
-    /// Latest quota windows for a Claude profile scope. Sessions that map to
-    /// the same scope share this canonical reading.
+    /// Legacy profile-shared windows; not trusted by current StatusLine data.
     #[serde(default)]
     pub quota_scope_windows: BTreeMap<String, Vec<UsageWindow>>,
     /// Login identity the snapshot was fetched for (Grok `user_id`, Codex
@@ -614,6 +609,7 @@ pub struct ProviderSnapshot {
 impl ProviderSnapshot {
     pub fn new(provider: Provider, windows: Vec<UsageWindow>, fetched_at_unix: u64) -> Self {
         Self {
+            session_quota_only: false,
             provider,
             source: provider.source().to_string(),
             fetched_at_unix,
@@ -632,6 +628,11 @@ impl ProviderSnapshot {
 
     pub fn with_context(mut self, context: Option<ContextUsage>) -> Self {
         self.context = context;
+        self
+    }
+
+    pub fn session_local(mut self) -> Self {
+        self.session_quota_only = true;
         self
     }
 
@@ -691,6 +692,12 @@ impl ProviderSnapshot {
     /// 5. Keyed maps exist but this session is unknown → empty. A missing
     ///    session must not borrow another account's numbers.
     pub fn windows_for_session(&self, session_id: Option<&str>) -> &[UsageWindow] {
+        if self.session_quota_only {
+            return session_id
+                .and_then(|id| self.session_windows.get(id))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+        }
         let Some(session_id) = session_id else {
             return &self.windows;
         };
@@ -729,10 +736,17 @@ impl ProviderSnapshot {
         current_account_id: Option<&str>,
         credentials_mtime_unix: Option<u64>,
     ) -> bool {
+        if matches!(self.provider, Provider::Claude | Provider::Agy)
+            && self.account_id.is_none()
+            && !self.session_quota_only
+        {
+            return false;
+        }
         match (self.account_id.as_deref(), current_account_id) {
             (Some(saved), Some(current)) => saved == current,
             (Some(_), None) => false,
-            (None, Some(_)) | (None, None) => {
+            (None, Some(_)) => false,
+            (None, None) => {
                 credentials_mtime_unix.is_none_or(|mtime| mtime <= self.fetched_at_unix)
             }
         }
@@ -1009,8 +1023,8 @@ mod tests {
     fn legacy_snapshot_is_dropped_when_credentials_are_newer_than_the_fetch() {
         let snapshot = ProviderSnapshot::new(Provider::Grok, vec![], 100);
         assert!(!snapshot.usable_for_account(Some("account-b"), Some(150)));
-        assert!(snapshot.usable_for_account(Some("account-b"), Some(100)));
-        assert!(snapshot.usable_for_account(Some("account-b"), Some(50)));
+        assert!(!snapshot.usable_for_account(Some("account-b"), Some(100)));
+        assert!(!snapshot.usable_for_account(Some("account-b"), Some(50)));
         assert!(!snapshot.usable_for_account(None, Some(150)));
         assert!(snapshot.usable_for_account(None, Some(50)));
     }

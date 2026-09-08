@@ -1,5 +1,7 @@
 # OpenCode Go 用量端点研究
 
+> Historical research, valid as of the date below. For current behavior and upgrade instructions, see the [README](../../README.md).
+
 > 研究日期：2026-08-29（Asia/Shanghai）
 > 复核版本：CodexBar `b366a2d5aa52047524a8b9177a99e2a1c1eedd70`（2026-08-28）；
 > opencode `1.18.20`（Homebrew core，本机实测）；models.dev API 快照同日。

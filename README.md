@@ -1,25 +1,20 @@
 # herdr-agent-quota
 
-Credential-scoped model, context, cache, and quota data in Herdr's Agent sidebar.
+Model, context, prompt-cache usage, and subscription quota in Herdr's Agent sidebar.
 
 [![CI](https://github.com/levi-qiao/herdr-agent-quota/actions/workflows/ci.yml/badge.svg)](https://github.com/levi-qiao/herdr-agent-quota/actions/workflows/ci.yml)
-[![Rust](https://img.shields.io/badge/built%20with-Rust-dea584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-中文文档：[README.zh-CN.md](README.zh-CN.md)
+[简体中文](README.zh-CN.md)
 
-Herdr's native machine/workspace/tab row and agent identity row stay at the top.
-Quota fields follow below: `packed` joins related fields; `stacked` separates them.
-Herdr owns Space rows (Git branch/status), worktree grouping, and Agent ordering.
-The plugin leaves those settings intact; quota ordering is opt-in. Custom fields
-and styles added to shared Agent rows also survive reconfiguration.
+The plugin preserves Herdr's native rows, custom styles, and worktree grouping.
+Optional quota ordering and low-quota notifications are disabled by default.
+Empty fields collapse; percentages can show remaining or used quota.
 
-Empty values collapse. Failed refreshes keep the last good value for the same
-account; confirmed PAYG sessions clear stale subscription quota.
+## Install and upgrade
 
-## Install
-
-Requires Herdr 0.9.0+, Rust 1.95+, macOS or Linux, and at least one supported agent CLI.
+Requires **Herdr 0.9.0+**, the Rust toolchain pinned in `rust-toolchain.toml`,
+macOS or Linux, and a supported agent CLI.
 
 ```sh
 git clone https://github.com/levi-qiao/herdr-agent-quota.git
@@ -27,157 +22,104 @@ cd herdr-agent-quota
 ./install.sh
 ```
 
-Restart already-running agent panes once. To install only a subset:
+To enable a subset, use `./install.sh --agent claude,codex,omp`.
+Existing sessions need restarting only when newly installed hooks or Herdr
+integrations must be loaded.
+
+Upgrade from the repository directory:
 
 ```sh
-./install.sh --agent claude,codex,omp
+git pull --ff-only
+./install.sh
 ```
 
-`install.sh` only rewrites the shared `ui.sidebar.agents.rows` array when it is
-empty, managed by the plugin, or matches a supported default layout. These rows
-use Herdr 0.9's `[["state_icon", "machine", "workspace", "tab"], ["agent"]]`
-before the quota fields. Existing custom rows and styles are preserved, while
-`rows_by_agent` for the selected agents is still added or updated.
-
-Supported values: `all`, `claude`, `codex`, `grok`, `agy`, `opencode`, `pi`, `omp`, `devin`.
+Upgrades retain saved preferences, repair managed configuration, refresh quota,
+and restore background updates automatically. No cache deletion or watcher
+management is required. Changes to the Herdr server connection are adopted by
+the watcher automatically.
 
 ## Settings
 
-Press `prefix+shift+q`, or run:
+Press `prefix+shift+q`, or run the following if that key is already assigned:
 
 ```sh
 herdr plugin pane open --plugin herdr-agent-quota --entrypoint settings --focus
 ```
 
-Herdr 0.8 does not expose extension points for its built-in Settings tabs or
-bottom-right menu. The plugin therefore opens its own managed popup. A key
-conflict is preserved rather than overwritten; use the command above instead.
+<img src="docs/screenshots/settings.png" alt="Agent quota settings" width="760">
 
-<img src="docs/screenshots/settings.png" alt="Agent quota settings pane" width="760">
-
-| Control | Values | Effect |
-| --- | --- | --- |
-| Percentages | `remaining`, `used` | Changes the number; colors still mean remaining headroom. |
-| Sidebar layout | `packed`, `stacked` | Joins related fields or gives each field a row. |
-| Row gap | `0`, `1` | Controls spacing between Agent cards. |
-| Watch interval | 30s–1h | Refresh cadence while an agent is working. |
-| Brand colors | `on`, `off` | Colors provider/model names; severity colors remain. |
-| Agent order | `default`, `quota` | Optionally puts the lowest-headroom agent first. |
-| Low quota alert | `off`, 5–50% | Notifies once when a provider crosses the threshold. |
-| Fields | topic, model, cache, TTL, context, short/long quota | Hides optional dimensions. |
-| Agents | eight supported harnesses | Installs or removes collectors and sidebar rows. |
-
-Use `↑/↓` to move, `←/→` or Space to change, `a` to apply, and `q` to close.
-A `*` means there are unapplied changes.
-
-The same settings are scriptable:
-
-```sh
-./install.sh \
-  --agent all \
-  --sidebar-layout packed \
-  --row-gap 1 \
-  --quota-percent remaining \
-  --fields all \
-  --brand-colors on \
-  --agent-order quota \
-  --low-quota-alert 10 \
-  --watch-interval-seconds 60
-```
-
-Manual refresh and uninstall:
-
-```sh
-herdr plugin action invoke refresh --plugin herdr-agent-quota
-./uninstall.sh
-```
-
-## What is displayed
-
-| Dimension | Source and behavior |
+| Setting | Options |
 | --- | --- |
-| Provider / model | Exact route and active model for the pane's session. Devin uses `sessions.db` when that pane's session id is present, otherwise `config.json` `agent.model`. |
-| Topic | Current visible user prompt; the previous topic survives when it scrolls away. |
-| Context | Used percentage of the active model's context window. |
-| Cache | Session cache hit rate when the agent exposes trustworthy counters. |
-| Cache TTL | Recorded expiry when available; `ttl≈` marks a documented estimate. |
-| Quota | Remaining or used percentage plus reset ETA, scoped to the serving account. |
-| Headroom | Tightest visible quota, used by optional sorting and notifications. |
+| Percentages | Remaining or used; colors always indicate remaining headroom |
+| Layout | `packed` groups related fields; `stacked` gives each field a row |
+| Row gap | Zero or one blank line between agents |
+| Watch interval | 30 seconds–1 hour; default 60 seconds |
+| Fields | Topic, model, cache, TTL, context, short/long quota |
+| Brand colors | On or off |
+| Agent order | Herdr default or lowest remaining quota first |
+| Low quota alert | Off or a threshold from 1% to 100% |
+| Agents | Claude, Codex, Grok, Agy, OpenCode, Pi, OMP, Devin |
 
-| Agent | Quota support | Session diagnostics |
+Use arrows or Space to edit, `a` to apply, and `q` to close.
+Installer options are also available through `./install.sh --help`.
+
+## Data sources and limits
+
+| Agent | Quota source | Attribution |
 | --- | --- | --- |
-| Claude Code | 5h + 7d | model, context, cache, recorded prompt-cache expiry |
-| OpenAI Codex | 5h + 7d | model, context, cache, estimated 30m cache TTL, summary |
-| Grok CLI | 7d or 30d | model, context, cache |
-| Agy / Antigravity | 5h + 7d | statusLine model, context, cache |
-| OpenCode | OpenCode Go 5h + 7d; 30d in dashboard | exact local session model/context |
-| Pi | Canonical Codex quota on an exact account match | model, context, cache, supported TTL data |
-| omp (oh-my-pi) | OMP-normalized windows such as `5h`, `1d`, `7d`, `Monthly` | model, context, cache, supported TTL data |
-| Devin CLI | 1d + 7d | Per-session model from `~/.local/share/devin/cli/sessions.db` (`id`, `model`), mapped through local `devin-models.json`. A session not in the DB uses `config.json` `agent.model`. Not the API `planName`. |
+| Codex | Codex app-server; 5h and/or 7d | Current login in the plugin's `CODEX_HOME` |
+| Grok | CLI billing endpoint; 7d or 30d | Current CLI credentials |
+| Devin | CLI usage endpoint; 1d and 7d | Current CLI credentials |
+| Claude Code | StatusLine; 5h and 7d | Exact session observation |
+| Agy / Antigravity | StatusLine; 5h and 7d | Exact session and identifiable model pool |
+| OpenCode | OpenCode Go usage endpoint | Go credential; confirmed PAYG routes have no subscription quota |
+| Pi | Canonical Codex quota | Only when the recorded account matches |
+| OMP | `omp usage --json --provider <id>` | Reported account matching the session's credential pin |
 
-OMP is a generic adapter, not a second set of provider adapters. The plugin runs
-`omp usage --json --provider <id>`, retains OMP's window labels, and attributes
-the result with the session's `credential_pin`. It never opens OMP's credential
-database or reinterprets Google, Anthropic, or OpenAI periods. OMP's five-minute
-usage cache remains authoritative; this plugin adds a one-minute process debounce.
+Quota windows retain their provider's meaning. Model, context, and cache data
+come from the identified session when available. `ttl≈` marks an estimated
+prompt-cache lifetime, not a guaranteed expiry. Topic extraction uses only the
+named pane's visible screen and preserves the last topic when it scrolls away.
 
-The sidebar has short and long quota rows. OMP's common windows occupy those rows
-while retaining their labels; one normalized window is shown per row.
+All supported working agents participate in one background watcher. Requests
+are debounced for 60 seconds, including a final refresh after a turn settles.
+OMP additionally retains its own five-minute usage cache. Idle panes sharing a
+verified quota source receive the same reading.
 
-## Herdr integrations
-
-Herdr must report the exact session before local model, context, and account data
-can be attributed:
-
-```sh
-herdr integration status
-```
-
-Enabling OMP automatically installs `herdr integration omp` when it is missing.
-Restart an already-running OMP pane afterward because integrations load at agent
-startup. Other missing integrations can be repaired directly:
-
-```sh
-herdr integration install opencode
-herdr integration install pi
-herdr integration install omp
-herdr integration install devin
-```
+Native Codex, Grok, and Devin collectors follow the plugin's current login,
+not separate accounts for each pane. Claude/Agy do not report a reliable serving
+account ID, so their observations are not shared across sessions. Unknown
+identity or model-pool attribution does not produce a guessed quota. Failed
+requests preserve the last verified reading for that same account; they do not
+turn failures into zero usage.
 
 ## Troubleshooting
 
 | Symptom | Check |
 | --- | --- |
-| OpenCode, Pi, OMP, or Devin is blank | Run `herdr integration status`, install the missing integration, then restart that pane. |
-| Devin has no quota | Confirm `~/.local/share/devin/credentials.toml` (or `$DEVIN_CREDENTIALS_FILE`) contains `windsurf_api_key`. |
-| OMP has model/context but no quota | Run `omp usage --json --redact --provider <id>` and confirm a report exists. |
-| Herdr cannot execute OMP | Put `omp` on the server's `PATH`, or set `HERDR_AGENT_QUOTA_OMP_BIN`. |
-| Claude or Agy shows `N/A` | Send one turn so its statusLine emits a snapshot. |
-| Rows do not appear | Run `herdr plugin action invoke configure --plugin herdr-agent-quota`, then restart affected panes. |
-| A value survives a provider outage | Expected: the same account's last good snapshot is retained. |
-| Packed rows are truncated | Switch to `stacked`; Herdr does not wrap sidebar tokens. |
-
-## Safety
-
-- No prompt or model request is generated.
-- Events read only their named pane with `--source visible`; refresh and watch do not read panes.
-- Credentials remain in the owning CLI. Snapshots hold sanitized usage and hashed attribution only.
-- OMP's `agent.db` is never opened; quota comes only from OMP CLI output.
-- Devin quota uses the CLI's `GetUserStatus` contract. The API key is hashed for account identity and never stored.
-- Metadata is written only when a token changes and remains within Herdr's 16-token limit.
-
-## Development
+| Session data is missing | Run `herdr integration status`; load missing integrations before restarting the affected agent |
+| Claude/Agy quota is missing | Send a turn so the session's StatusLine produces an observation |
+| OMP quota is missing | Check `omp usage --json --redact --provider <id>` |
+| Devin quota is missing | Check the CLI login and `DEVIN_CREDENTIALS_FILE` if customized |
+| Rows are missing | Run the configure action below to repair managed configuration |
+| Packed rows are truncated | Select `stacked` |
 
 ```sh
-cargo fmt --all -- --check
-cargo test --all-targets --all-features --locked
-cargo clippy --release --all-targets --all-features --locked -- -D warnings
-cargo build --release --locked
+herdr plugin action invoke refresh --plugin herdr-agent-quota
+herdr plugin action invoke configure --plugin herdr-agent-quota
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and
-[CHANGELOG.md](CHANGELOG.md).
+Uninstall everything with `./uninstall.sh`, or remove a subset with
+`./uninstall.sh --agent grok`. Configuration changes are reversible; user-owned
+settings and other agents remain intact.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development and validation,
+[SECURITY.md](SECURITY.md) for data handling and vulnerability reports, and
+[CHANGELOG.md](CHANGELOG.md) for release notes. Dated investigations are indexed
+in [docs/README.md](docs/README.md).
 
 ## License
 
-MIT. Not affiliated with Herdr, OpenAI, Anthropic, xAI, Google, OpenCode, or Cognition.
+[MIT](LICENSE). Not affiliated with Herdr or the supported AI providers.

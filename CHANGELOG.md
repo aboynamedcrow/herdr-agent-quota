@@ -6,6 +6,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-09-08
+
+### Fixed
+
+- Recover background quota updates across Herdr upgrades and live handoffs;
+  normal installation/repair restores the watcher and retains preferences.
+  Refresh and event paths respect the saved agent selection.
+- Include Pi, OMP, and OpenCode in active-turn polling and complete a delayed
+  final refresh when a turn ends inside the request debounce window.
+- Bind OpenCode Go and ID-less Grok caches to their credentials; retain OMP
+  readings for all reported account pins without spawning once per account.
+- Remove unverified Codex rollout windows and rebuild legacy quota data from
+  authoritative API responses or original StatusLine payloads.
+
+### Changed
+
+- Claude/Agy quota is session-local because StatusLine does not prove account
+  identity. An unknown Agy model no longer combines two quota pools.
+- Consolidate English/Chinese usage and upgrade documentation; separate dated
+  research from current guidance and remove the completed internal task plan.
+
 ## [1.5.0] - 2026-09-08
 
 ### Changed
@@ -588,7 +609,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A popup dashboard pane, event-driven refresh, and a local snapshot cache that
   survives provider failures.
 
-[Unreleased]: https://github.com/levi-qiao/herdr-agent-quota/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/levi-qiao/herdr-agent-quota/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/levi-qiao/herdr-agent-quota/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/levi-qiao/herdr-agent-quota/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/levi-qiao/herdr-agent-quota/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/levi-qiao/herdr-agent-quota/compare/v1.2.0...v1.3.0

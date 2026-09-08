@@ -569,14 +569,14 @@ fn claude_cache_is_published_by_refresh_event() {
     let state = tempdir().unwrap();
     let (herdr_stub, herdr_log) = install_herdr_stub(
         state.path(),
-        r#"{"result":{"agents":[{"agent":"claude","pane_id":"w1:p1"}]}}"#,
+        r#"{"result":{"agents":[{"agent":"claude","pane_id":"w1:p1","agent_session":{"value":"test-session"}}]}}"#,
     );
     let reset = future_reset_unix();
     run_claude_collector(
         state.path(),
         &herdr_stub,
         format!(
-            r#"{{"rate_limits":{{"five_hour":{{"used_percentage":58.0,"resets_at":{reset}}},"seven_day":{{"used_percentage":27.0,"resets_at":{reset}}}}}}}"#
+            r#"{{"session_id":"test-session","rate_limits":{{"five_hour":{{"used_percentage":58.0,"resets_at":{reset}}},"seven_day":{{"used_percentage":27.0,"resets_at":{reset}}}}}}}"#
         )
         .as_bytes(),
     );
@@ -723,7 +723,7 @@ fn concurrent_claude_accounts_keep_their_own_quota_windows() {
 }
 
 #[test]
-fn claude_panes_on_the_same_profile_share_the_newest_quota() {
+fn claude_panes_on_the_same_profile_keep_their_own_observations() {
     let state = tempdir().unwrap();
     let profile = state.path().join("claude-profile");
     fs::create_dir_all(&profile).unwrap();
@@ -759,7 +759,7 @@ fn claude_panes_on_the_same_profile_share_the_newest_quota() {
         .find(|line| line.contains("w2:p1"))
         .expect("live pane reported");
     assert!(
-        idle_report.contains("quota_5h_danger=5h 8%"),
+        idle_report.contains("quota_5h_normal=5h 95%"),
         "{idle_report}"
     );
     assert!(
@@ -769,7 +769,7 @@ fn claude_panes_on_the_same_profile_share_the_newest_quota() {
 }
 
 #[test]
-fn idle_claude_statusline_tick_does_not_regress_shared_profile_quota() {
+fn idle_claude_statusline_tick_does_not_change_another_sessions_quota() {
     let state = tempdir().unwrap();
     let profile = state.path().join("claude-profile");
     fs::create_dir_all(&profile).unwrap();
@@ -811,7 +811,7 @@ fn idle_claude_statusline_tick_does_not_regress_shared_profile_quota() {
         .find(|line| line.contains("w2:p1"))
         .expect("live pane reported");
     assert!(
-        idle_report.contains("quota_5h_danger=5h 8%"),
+        idle_report.contains("quota_5h_normal=5h 95%"),
         "{idle_report}"
     );
     assert!(
@@ -821,7 +821,7 @@ fn idle_claude_statusline_tick_does_not_regress_shared_profile_quota() {
 }
 
 #[test]
-fn claude_new_session_without_rate_limits_keeps_profile_quota() {
+fn claude_new_session_without_rate_limits_cannot_borrow_profile_quota() {
     let state = tempdir().unwrap();
     let profile = state.path().join("claude-profile");
     fs::create_dir_all(&profile).unwrap();
@@ -856,7 +856,7 @@ fn claude_new_session_without_rate_limits_keeps_profile_quota() {
         .find(|line| line.contains("w2:p1"))
         .expect("session B reported");
     assert!(session_a.contains("quota_5h_normal=5h 82%"), "{session_a}");
-    assert!(session_b.contains("quota_5h_normal=5h 82%"), "{session_b}");
+    assert!(session_b.contains("quota_5h_unknown=5h N/A"), "{session_b}");
 }
 
 #[test]
@@ -1303,7 +1303,7 @@ fn a_low_quota_notifies_once_and_re_arms_only_after_recovering() {
     let state = tempdir().unwrap();
     let (herdr_stub, herdr_log) = install_herdr_stub(
         state.path(),
-        r#"{"result":{"agents":[{"agent":"claude","pane_id":"w1:p1","tokens":{}}]}}"#,
+        r#"{"result":{"agents":[{"agent":"claude","pane_id":"w1:p1","agent_session":{"value":"test-session"},"tokens":{}}]}}"#,
     );
     fs::create_dir_all(state.path()).unwrap();
     fs::write(state.path().join("low-quota-alert"), "20%").unwrap();
@@ -1317,7 +1317,7 @@ fn a_low_quota_notifies_once_and_re_arms_only_after_recovering() {
     };
     let quota = |five_hour: f64, seven_day: f64| {
         format!(
-            r#"{{"rate_limits":{{"five_hour":{{"used_percentage":{five_hour}}},"seven_day":{{"used_percentage":{seven_day}}}}}}}"#
+            r#"{{"session_id":"test-session","rate_limits":{{"five_hour":{{"used_percentage":{five_hour}}},"seven_day":{{"used_percentage":{seven_day}}}}}}}"#
         )
     };
 
@@ -1354,12 +1354,12 @@ fn no_alert_threshold_means_no_notification_however_low_the_quota_is() {
     let state = tempdir().unwrap();
     let (herdr_stub, herdr_log) = install_herdr_stub(
         state.path(),
-        r#"{"result":{"agents":[{"agent":"claude","pane_id":"w1:p1","tokens":{}}]}}"#,
+        r#"{"result":{"agents":[{"agent":"claude","pane_id":"w1:p1","agent_session":{"value":"test-session"},"tokens":{}}]}}"#,
     );
     run_claude_collector(
         state.path(),
         &herdr_stub,
-        br#"{"rate_limits":{"five_hour":{"used_percentage":100.0},"seven_day":{"used_percentage":100.0}}}"#,
+        br#"{"session_id":"test-session","rate_limits":{"five_hour":{"used_percentage":100.0},"seven_day":{"used_percentage":100.0}}}"#,
     );
     run_claude_refresh(state.path(), &herdr_stub);
     let log = fs::read_to_string(&herdr_log).unwrap_or_default();
@@ -1374,11 +1374,11 @@ fn claude_collector_does_not_republish_unchanged_quota() {
     let state = tempdir().unwrap();
     let (herdr_stub, herdr_log) = install_herdr_stub(
         state.path(),
-        r#"{"result":{"agents":[{"agent":"claude","pane_id":"w1:p1","tokens":{"quota_provider":"Claude","quota_provider_model":"Claude","quota_5h_warning":"5h 42%","quota_week_normal":"7d 73%","quota_headroom":"042"}}]}}"#,
+        r#"{"result":{"agents":[{"agent":"claude","pane_id":"w1:p1","agent_session":{"value":"test-session"},"tokens":{"quota_provider":"Claude","quota_provider_model":"Claude","quota_5h_warning":"5h 42%","quota_week_normal":"7d 73%","quota_headroom":"042"}}]}}"#,
     );
 
     let input = br#"{
-        "rate_limits": {
+        "session_id":"test-session","rate_limits": {
             "five_hour": {"used_percentage": 58.0},
             "seven_day": {"used_percentage": 27.0}
         }
@@ -1494,7 +1494,7 @@ fn opencode_payg_event_clears_plugin_quota_once() {
 }
 
 #[test]
-fn opencode_indeterminate_event_preserves_plugin_quota() {
+fn opencode_indeterminate_event_removes_unconfirmed_quota() {
     let state = tempdir().unwrap();
     let xdg = state.path().join("xdg-data");
     install_opencode_store(&xdg, "auth-one-key.json", "sessions.db");
@@ -1520,13 +1520,13 @@ fn opencode_indeterminate_event_preserves_plugin_quota() {
     assert!(calls.contains("pane read w1:p9"), "{calls}");
     assert!(!calls.contains("pane read w1:p10"), "{calls}");
     assert!(
-        !calls.contains("pane report-metadata"),
-        "indeterminate must not clear quota: {calls}"
+        calls.contains("--clear-token quota_5h"),
+        "indeterminate must remove unconfirmed quota: {calls}"
     );
 }
 
 #[test]
-fn opencode_malformed_local_data_preserves_plugin_quota() {
+fn opencode_malformed_local_data_does_not_claim_previous_quota() {
     let state = tempdir().unwrap();
     let xdg = state.path().join("xdg-data");
     install_opencode_store(&xdg, "auth-malformed.json", "malformed.db");
@@ -1549,8 +1549,8 @@ fn opencode_malformed_local_data_preserves_plugin_quota() {
     original_four_untouched(state.path(), &codex_log);
     let calls = fs::read_to_string(&herdr_log).unwrap();
     assert!(
-        !calls.contains("pane report-metadata"),
-        "malformed evidence must preserve quota: {calls}"
+        calls.contains("--clear-token quota_5h"),
+        "malformed evidence must remove unconfirmed quota: {calls}"
     );
 }
 
@@ -2251,7 +2251,7 @@ fn pi_payg_event_clears_stale_quota_without_invoking_a_collector() {
 }
 
 #[test]
-fn pi_indeterminate_event_preserves_quota_but_replaces_session_diagnostics() {
+fn pi_indeterminate_event_removes_quota_but_keeps_current_session_diagnostics() {
     let state = tempdir().unwrap();
     let (pi_agent, pi_sessions, session) = install_pi_store(
         state.path(),
@@ -2287,13 +2287,13 @@ fn pi_indeterminate_event_preserves_quota_but_replaces_session_diagnostics() {
     );
     assert!(calls.contains("--token quota_cache=cache 80.0%"), "{calls}");
     assert!(calls.contains("--clear-token quota_cache_ttl"), "{calls}");
-    assert!(calls.contains("--token quota_5h=5h 10%"), "{calls}");
-    assert!(calls.contains("--token quota_week=7d 20%"), "{calls}");
+    assert!(calls.contains("--clear-token quota_5h"), "{calls}");
+    assert!(calls.contains("--clear-token quota_week"), "{calls}");
     assert!(!codex_log.exists(), "indeterminate route invoked Codex");
 }
 
 #[test]
-fn pi_different_account_preserves_stale_quota_and_cannot_borrow_codex_cache() {
+fn pi_different_account_clears_stale_quota_and_cannot_borrow_codex_cache() {
     let state = tempdir().unwrap();
     let (pi_agent, pi_sessions, session) = install_pi_store(
         state.path(),
@@ -2332,15 +2332,15 @@ fn pi_different_account_preserves_stale_quota_and_cannot_borrow_codex_cache() {
         calls.contains("--token quota_provider_model=Codex/model-b"),
         "{calls}"
     );
-    assert!(calls.contains("--token quota_5h_danger=10%"), "{calls}");
-    assert!(calls.contains("--token quota_week_warning=20%"), "{calls}");
-    assert!(!calls.contains("--clear-token quota_5h"), "{calls}");
-    assert!(!calls.contains("--clear-token quota_week"), "{calls}");
+    assert!(!calls.contains("--token quota_5h_danger=10%"), "{calls}");
+    assert!(!calls.contains("--token quota_week_warning=20%"), "{calls}");
+    assert!(calls.contains("--clear-token quota_5h"), "{calls}");
+    assert!(calls.contains("--clear-token quota_week"), "{calls}");
     assert!(!codex_log.exists(), "indeterminate route invoked Codex");
 }
 
 #[test]
-fn pi_model_switch_updates_identity_but_preserves_indeterminate_quota() {
+fn pi_model_switch_updates_identity_and_removes_unconfirmed_quota() {
     let state = tempdir().unwrap();
     let (pi_agent, pi_sessions, session) = install_pi_store(
         state.path(),
@@ -2372,10 +2372,10 @@ fn pi_model_switch_updates_identity_but_preserves_indeterminate_quota() {
         calls.contains("--token quota_provider_model=Grok/grok-4.6"),
         "{calls}"
     );
-    assert!(calls.contains("--token quota_5h_danger=10%"), "{calls}");
-    assert!(calls.contains("--token quota_week_warning=20%"), "{calls}");
-    assert!(!calls.contains("--clear-token quota_5h"), "{calls}");
-    assert!(!calls.contains("--clear-token quota_week"), "{calls}");
+    assert!(!calls.contains("--token quota_5h_danger=10%"), "{calls}");
+    assert!(!calls.contains("--token quota_week_warning=20%"), "{calls}");
+    assert!(calls.contains("--clear-token quota_5h"), "{calls}");
+    assert!(calls.contains("--clear-token quota_week"), "{calls}");
     assert!(!codex_log.exists(), "switched xAI route invoked Codex");
 }
 

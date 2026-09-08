@@ -1,7 +1,7 @@
 use crate::cache::CacheStore;
 use crate::model::{
-    sibling_quota_reset_in, CacheTotals, CacheUsage, ContextUsage, Provider, ProviderSnapshot,
-    ResetAt, UsageWindow, WindowKind,
+    CacheTotals, CacheUsage, ContextUsage, Provider, ProviderSnapshot, ResetAt, UsageWindow,
+    WindowKind,
 };
 use crate::providers::ProviderError;
 use anyhow::{Context, Result};
@@ -285,20 +285,14 @@ fn enrich_local_sessions(snapshot: &mut ProviderSnapshot, session_ids: &[String]
     let Some(home) = codex_home().ok() else {
         return;
     };
-    enrich_local_sessions_at(snapshot, &home, session_ids, auth_mtime_unix());
+    enrich_local_sessions_at(snapshot, &home, session_ids);
 }
 
-fn enrich_local_sessions_at(
-    snapshot: &mut ProviderSnapshot,
-    home: &Path,
-    session_ids: &[String],
-    auth_mtime_unix: Option<u64>,
-) {
+fn enrich_local_sessions_at(snapshot: &mut ProviderSnapshot, home: &Path, session_ids: &[String]) {
     if session_ids.is_empty() {
         return;
     }
     let mut newest: Option<(u64, Option<String>, ContextUsage)> = None;
-    let mut newest_windows: Option<(u64, Vec<UsageWindow>)> = None;
     let rollout_paths = find_rollout_paths(home, session_ids);
     for session_id in session_ids {
         let Some(path) = rollout_paths.get(session_id) else {
@@ -315,17 +309,6 @@ fn enrich_local_sessions_at(
             .ok()
             .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or(0, |duration| duration.as_secs());
-        if rollout_windows_can_fill_account_quota(
-            snapshot,
-            &observation.windows,
-            modified,
-            auth_mtime_unix,
-        ) && newest_windows
-            .as_ref()
-            .is_none_or(|(current, _)| modified >= *current)
-        {
-            newest_windows = Some((modified, observation.windows));
-        }
         let Some(context) = observation.context else {
             continue;
         };
@@ -340,38 +323,12 @@ fn enrich_local_sessions_at(
             newest = Some((modified, observation.model, context));
         }
     }
-    if let Some((_, windows)) = newest_windows {
-        for window in windows {
-            if snapshot.window(window.kind).is_none() {
-                snapshot.windows.push(window);
-            }
-        }
-    }
     if let Some((_, model, context)) = newest {
         if model.is_some() {
             snapshot.model = model;
         }
         snapshot.context = Some(context);
     }
-}
-
-/// Account-level 5h/7d comes from `account/rateLimits/read`. A local rollout
-/// may fill a window the API omitted this tick, but only when that rollout
-/// still belongs to the signed-in account: written at or after the current
-/// `auth.json`, and with a weekly window that has not itself reset.
-fn rollout_windows_can_fill_account_quota(
-    snapshot: &ProviderSnapshot,
-    rollout_windows: &[UsageWindow],
-    rollout_mtime: u64,
-    auth_mtime_unix: Option<u64>,
-) -> bool {
-    if rollout_windows.is_empty() {
-        return false;
-    }
-    if auth_mtime_unix.is_some_and(|auth| rollout_mtime < auth) {
-        return false;
-    }
-    !sibling_quota_reset_in(&snapshot.windows, rollout_windows)
 }
 
 fn find_rollout_paths(home: &Path, session_ids: &[String]) -> BTreeMap<String, PathBuf> {
@@ -425,7 +382,6 @@ fn find_rollout_paths(home: &Path, session_ids: &[String]) -> BTreeMap<String, P
 struct RolloutObservation {
     model: Option<String>,
     context: Option<ContextUsage>,
-    windows: Vec<UsageWindow>,
 }
 
 fn read_rollout_observation(path: &Path, session_id: &str) -> Option<RolloutObservation> {
@@ -459,7 +415,6 @@ fn read_rollout_head_model(path: &Path) -> Option<String> {
 fn parse_rollout_observation(text: &str, session_id: &str) -> Option<RolloutObservation> {
     let mut model = None;
     let mut context = None;
-    let mut windows = Vec::new();
     for line in text.lines() {
         let Ok(entry) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -476,9 +431,9 @@ fn parse_rollout_observation(text: &str, session_id: &str) -> Option<RolloutObse
         if payload.get("type").and_then(Value::as_str) != Some("token_count") {
             continue;
         }
-        if let Some(rate_limits) = payload.get("rate_limits") {
-            windows = collect_codex_windows(rate_limits);
-        }
+        // Rollouts do not identify the serving account. A still-running old
+        // session can write after auth.json changes, so its quota must never
+        // supplement the current account's app-server response.
         let info = payload.get("info").unwrap_or(payload);
         let Some(last) = info
             .get("last_token_usage")
@@ -527,11 +482,7 @@ fn parse_rollout_observation(text: &str, session_id: &str) -> Option<RolloutObse
             .with_cache(cache);
         context = Some(context_value);
     }
-    Some(RolloutObservation {
-        model,
-        context,
-        windows,
-    })
+    Some(RolloutObservation { model, context })
 }
 
 fn parse_rollout_timestamp(entry: &Value) -> Option<u64> {
@@ -961,7 +912,6 @@ mod tests {
             &mut snapshot,
             directory.path(),
             &["session-1".to_string(), "other-session".to_string()],
-            None,
         );
         assert_eq!(snapshot.model.as_deref(), Some("gpt-5.6"));
         assert!(snapshot.session_contexts.contains_key("session-1"));
@@ -969,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn latest_rollout_rate_limits_fill_a_missing_five_hour_window() {
+    fn unattributed_rollout_cannot_add_a_window_to_the_current_accounts_quota() {
         let directory = tempfile::tempdir().unwrap();
         let rollout_dir = directory.path().join("sessions/2026/08/27");
         fs::create_dir_all(&rollout_dir).unwrap();
@@ -987,16 +937,12 @@ mod tests {
             1,
         )
         .unwrap();
-        enrich_local_sessions_at(
-            &mut snapshot,
-            directory.path(),
-            &["session-1".to_string()],
-            None,
-        );
-        assert_eq!(
-            snapshot.window(WindowKind::FiveHour).unwrap().used_percent,
-            12.0
-        );
+        snapshot.account_id = Some("new-account".to_string());
+        enrich_local_sessions_at(&mut snapshot, directory.path(), &["session-1".to_string()]);
+        // A file written after login may still be an old account's live
+        // session. Even an identical reset timestamp does not prove identity.
+        assert!(snapshot.window(WindowKind::FiveHour).is_none());
+        assert!(snapshot.session_contexts.contains_key("session-1"));
         assert_eq!(
             snapshot.window(WindowKind::Weekly).unwrap().used_percent,
             24.0
@@ -1023,12 +969,7 @@ mod tests {
             1,
         )
         .unwrap();
-        enrich_local_sessions_at(
-            &mut snapshot,
-            directory.path(),
-            &["session-1".to_string()],
-            None,
-        );
+        enrich_local_sessions_at(&mut snapshot, directory.path(), &["session-1".to_string()]);
         assert!(snapshot.window(WindowKind::FiveHour).is_none());
         assert_eq!(
             snapshot.window(WindowKind::Weekly).unwrap().used_percent,
@@ -1037,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn older_rollout_five_hour_window_is_not_used_after_auth_switch() {
+    fn rollout_five_hour_window_is_not_used_without_account_identity() {
         let directory = tempfile::tempdir().unwrap();
         let rollout_dir = directory.path().join("sessions/2026/08/27");
         fs::create_dir_all(&rollout_dir).unwrap();
@@ -1055,12 +996,7 @@ mod tests {
             1,
         )
         .unwrap();
-        enrich_local_sessions_at(
-            &mut snapshot,
-            directory.path(),
-            &["session-1".to_string()],
-            Some(u64::MAX),
-        );
+        enrich_local_sessions_at(&mut snapshot, directory.path(), &["session-1".to_string()]);
         assert!(snapshot.window(WindowKind::FiveHour).is_none());
         assert_eq!(
             snapshot.window(WindowKind::Weekly).unwrap().used_percent,
@@ -1087,12 +1023,7 @@ mod tests {
             1,
         )
         .unwrap();
-        enrich_local_sessions_at(
-            &mut snapshot,
-            directory.path(),
-            &["session-1".to_string()],
-            None,
-        );
+        enrich_local_sessions_at(&mut snapshot, directory.path(), &["session-1".to_string()]);
         assert!(snapshot.window(WindowKind::FiveHour).is_none());
         assert_eq!(
             snapshot.window(WindowKind::Weekly).unwrap().used_percent,

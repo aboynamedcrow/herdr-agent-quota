@@ -25,7 +25,7 @@ use std::process::Command;
 const MAX_USAGE_BYTES: usize = 4 * 1024 * 1024;
 
 /// One account's quota, as omp reports it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AccountUsage {
     /// `credentialPinHash()` of this account, so a transcript's pin selects it.
     pub pin: Option<String>,
@@ -34,7 +34,7 @@ pub struct AccountUsage {
 }
 
 /// What omp knows about one provider's credentials.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ProviderUsage {
     pub accounts: Vec<AccountUsage>,
     /// An API key is stored for this provider. Alone, that means the pane is

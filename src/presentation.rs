@@ -52,7 +52,11 @@ impl MetadataTokens {
             now_unix,
             snapshot.model_for_session(session_id),
             snapshot.context_for_session(session_id),
-            snapshot.windows_for_session(session_id),
+            if session_id.is_none() {
+                &snapshot.windows
+            } else {
+                snapshot.windows_for_session(session_id)
+            },
             style,
         )
     }
