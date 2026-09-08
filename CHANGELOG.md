@@ -12,6 +12,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Recover background quota updates across Herdr upgrades and live handoffs;
   normal installation/repair restores the watcher and retains preferences.
+  Refresh and event paths respect the saved agent selection.
 - Include Pi, OMP, and OpenCode in active-turn polling and complete a delayed
   final refresh when a turn ends inside the request debounce window.
 - Bind OpenCode Go and ID-less Grok caches to their credentials; retain OMP

@@ -131,3 +131,68 @@ fn every_supported_working_harness_keeps_the_watcher_alive() {
         );
     }
 }
+
+#[test]
+fn partial_install_startup_and_events_ignore_unselected_working_agents() {
+    let dir = tempfile::tempdir().unwrap();
+    let herdr = dir.path().join("herdr");
+    let log = dir.path().join("calls");
+    fs::write(dir.path().join("agents"), "agy\n").unwrap();
+    fs::write(
+        &herdr,
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$TEST_LOG"
+printf '%s\n' '{"result":{"agents":[{"pane_id":"w1:p1","agent":"codex","agent_status":"working"}]}}'
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o755)).unwrap();
+    let command = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_herdr-agent-quota"));
+        command
+            .env("HERDR_PLUGIN_STATE_DIR", dir.path())
+            .env("HERDR_PLUGIN_CONFIG_DIR", dir.path())
+            .env_remove("HERDR_AGENT_QUOTA_AGENTS")
+            .env("HERDR_AGENT_QUOTA_AGENT_ORDER", "default")
+            .env("HERDR_BIN_PATH", &herdr)
+            .env("CODEX_BIN_PATH", dir.path().join("absent"))
+            .env("TEST_LOG", &log)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    };
+    assert!(command()
+        .args(["startup", "--provider", "all"])
+        .status()
+        .unwrap()
+        .success());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fs::read_to_string(&log).unwrap().lines().count() < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "startup watcher did not inspect inventory"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(command()
+        .arg("event")
+        .env(
+            "HERDR_PLUGIN_EVENT_JSON",
+            r#"{"pane_id":"w1:p1","agent":"codex","status":"working"}"#
+        )
+        .status()
+        .unwrap()
+        .success());
+    assert!(fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .all(|line| line == "agent list"));
+    let cache = herdr_agent_quota::cache::CacheStore::new(dir.path());
+    assert!(!cache
+        .should_debounce(
+            herdr_agent_quota::model::Provider::Codex,
+            herdr_agent_quota::cache::CacheStore::now_unix(),
+            60
+        )
+        .unwrap());
+}

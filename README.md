@@ -57,7 +57,7 @@ herdr plugin pane open --plugin herdr-agent-quota --entrypoint settings --focus
 | Fields | Topic, model, cache, TTL, context, short/long quota |
 | Brand colors | On or off |
 | Agent order | Herdr default or lowest remaining quota first |
-| Low quota alert | Off or a threshold from 5% to 50% |
+| Low quota alert | Off or a threshold from 1% to 100% |
 | Agents | Claude, Codex, Grok, Agy, OpenCode, Pi, OMP, Devin |
 
 Use arrows or Space to edit, `a` to apply, and `q` to close.

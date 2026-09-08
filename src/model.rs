@@ -585,27 +585,17 @@ pub struct ProviderSnapshot {
     /// pane's local rollout usage.
     #[serde(default)]
     pub session_contexts: BTreeMap<String, ContextUsage>,
-    /// Account quota windows keyed by the provider's session id.
-    ///
-    /// Quota itself is account-level for every provider. Grok and Codex fetch
-    /// one login's windows and leave this map empty. StatusLine providers
-    /// (Claude, Agy) can run two signed-in accounts into one cache file, and
-    /// the top-level `windows` field only holds whichever account ticked last;
-    /// those ticks are stored here so a pane can read its own account.
-    ///
-    /// Claude also records an opaque profile scope per session. When that
-    /// mapping exists, [`Self::windows_for_session`] prefers the profile's
-    /// latest windows over this legacy per-session copy. Agy has no equivalent
-    /// profile identity and keeps using this map.
+    /// StatusLine quota observations keyed by the exact provider session ID.
+    /// Direct API collectors leave this map empty. Current Claude/Agy
+    /// snapshots set `session_quota_only` and never share these observations
+    /// across sessions, because StatusLine does not prove account identity.
     #[serde(default)]
     pub session_windows: BTreeMap<String, Vec<UsageWindow>>,
-    /// Opaque Claude profile identity for a session. The value is a SHA-256
-    /// hex digest of the normalized config directory; the raw path is never
-    /// stored.
+    /// Legacy Claude profile digests retained for cache format compatibility.
+    /// Current session-local observations clear this map during migration.
     #[serde(default)]
     pub session_quota_scopes: BTreeMap<String, String>,
-    /// Latest quota windows for a Claude profile scope. Sessions that map to
-    /// the same scope share this canonical reading.
+    /// Legacy profile-shared windows; not trusted by current StatusLine data.
     #[serde(default)]
     pub quota_scope_windows: BTreeMap<String, Vec<UsageWindow>>,
     /// Login identity the snapshot was fetched for (Grok `user_id`, Codex

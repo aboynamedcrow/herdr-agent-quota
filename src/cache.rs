@@ -357,8 +357,8 @@ impl CacheStore {
 
     /// StatusLine payloads may temporarily omit context (before the first
     /// response and immediately after compaction). Keep the last known value.
-    /// Quota windows still come from the newest snapshot, except an omitted
-    /// 5h/weekly window is restored when it is still current.
+    /// Session-local quota windows come from the newest observation; omitted
+    /// windows are not restored from legacy profile-shared data.
     pub fn save_preserving_context(&self, snapshot: ProviderSnapshot) -> Result<()> {
         self.save_preserving_context_for_session(snapshot, None)
     }

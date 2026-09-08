@@ -1,5 +1,5 @@
 use crate::cache::CacheStore;
-use crate::cli::{LowQuotaAlert, PercentStyle};
+use crate::cli::{AgentSelection, LowQuotaAlert, PercentStyle};
 use crate::herdr::{
     current_focused_pane, list_agent_panes, list_agent_state, plugin_quota_present,
     publish_pane_tokens, refresh_pane_topic, AgentPane, PaneQuotaUpdate, PaneTokens,
@@ -149,13 +149,15 @@ pub fn watch(providers: &[Provider], interval_seconds: Option<u64>, defer: bool)
         // A transient Herdr failure should not terminate a live watcher; the
         // one-hour cap below still prevents an orphaned process. The next
         // poll retries the single inventory call.
-        let Ok(state) = list_agent_state() else {
+        let Ok(mut state) = list_agent_state() else {
             if started.elapsed() >= MAX_ACTIVE_TURN_WATCH {
                 break;
             }
             wait_for_watch_tick(&cache, interval, started_at, started_millis);
             continue;
         };
+        let enabled = AgentSelection::from_args_or_env(&[]);
+        state.panes.retain(|pane| enabled.contains(&pane.harness));
         let active = state
             .working_pane_ids
             .iter()
@@ -277,9 +279,19 @@ fn run_internal(
     // Agent inventory is metadata-only. Reusing it for both the fetch and the
     // publish pass lets local Codex/Grok diagnostics target the exact pane
     // sessions without adding another Herdr call or reading any pane output.
-    let panes = list_agent_panes().ok();
+    let enabled = AgentSelection::from_args_or_env(&[]);
+    let panes = list_agent_panes().ok().map(|panes| {
+        panes
+            .into_iter()
+            .filter(|pane| enabled.contains(&pane.harness))
+            .collect::<Vec<_>>()
+    });
     let session_panes = panes.as_deref().unwrap_or_default();
-    let outcomes = refresh_selected(&cache, providers, force, session_panes)?;
+    let enabled_providers = providers.iter().copied().filter(|provider| {
+        enabled.iter().any(|harness| harness.billing() == Some(*provider))
+            || session_panes.iter().any(|pane| matches!(route::resolve(pane), Resolution::Subscription(target) if target.original_provider() == Some(*provider)))
+    }).collect::<Vec<_>>();
+    let outcomes = refresh_selected(&cache, &enabled_providers, force, session_panes)?;
     // The all-provider pass (startup and the manual refresh action) is the only
     // one that speaks for every pane, including harnesses with no legacy 1:1
     // collector. A narrower `--provider` selection publishes only its own panes.
@@ -306,6 +318,9 @@ pub fn event() -> Result<()> {
     let Some(harness) = Harness::from_agent_name(agent) else {
         return Ok(());
     };
+    if !AgentSelection::from_args_or_env(&[]).contains(&harness) {
+        return Ok(());
+    }
     let Some(pane_id) = find_pane_id(event) else {
         return Ok(());
     };
@@ -367,6 +382,9 @@ fn named_pane(pane_id: &str, harness: Harness) -> Result<Option<AgentPane>> {
 }
 
 fn handle_named_pane(cache: &CacheStore, pane: AgentPane, topic_pane: Option<&str>) -> Result<()> {
+    if !AgentSelection::from_args_or_env(&[]).contains(&pane.harness) {
+        return Ok(());
+    }
     WatchHerdrEnvironment::current().save(cache)?;
     let mut panes = [pane];
     if topic_pane == Some(panes[0].pane_id.as_str()) {

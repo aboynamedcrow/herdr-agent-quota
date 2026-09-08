@@ -53,7 +53,7 @@ herdr plugin pane open --plugin herdr-agent-quota --entrypoint settings --focus
 | Fields | 主题、模型、缓存、TTL、上下文、短期／长期额度 |
 | Brand colors | 开启或关闭品牌色 |
 | Agent order | Herdr 默认排序，或剩余额度最少的优先 |
-| Low quota alert | 关闭，或设置 5%–50% 的提醒阈值 |
+| Low quota alert | 关闭，或设置 1%–100% 的提醒阈值 |
 | Agents | Claude、Codex、Grok、Agy、OpenCode、Pi、OMP、Devin |
 
 方向键或空格修改，`a` 应用，`q` 关闭。脚本配置选项见 `./install.sh --help`。
