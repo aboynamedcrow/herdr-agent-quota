@@ -105,6 +105,64 @@ impl CacheStore {
         Self::atomic_replace(&destination, &temporary, bytes)
     }
 
+    /// One sanitized report per OMP provider retains all reported account
+    /// pins without spawning the CLI once for each pane/account.
+    pub fn load_omp_usage(
+        &self,
+        target: &BillingTarget,
+    ) -> Option<crate::providers::omp::ProviderUsage> {
+        let bytes = fs::read(
+            self.root
+                .join(format!("{}.usage.json", target.cache_identity())),
+        )
+        .ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    pub fn save_omp_usage(
+        &self,
+        target: &BillingTarget,
+        usage: &crate::providers::omp::ProviderUsage,
+    ) -> Result<()> {
+        self.ensure()?;
+        let mut usage = usage.clone();
+        let previous_accounts = self
+            .load_omp_usage(target)
+            .map(|report| report.accounts)
+            .unwrap_or_else(|| {
+                self.load_target(target)
+                    .ok()
+                    .flatten()
+                    .map(|snapshot| {
+                        vec![crate::providers::omp::AccountUsage {
+                            pin: snapshot.account_id,
+                            windows: snapshot.windows,
+                            fetched_at_unix: snapshot.fetched_at_unix,
+                        }]
+                    })
+                    .unwrap_or_default()
+            });
+        for account in previous_accounts {
+            if account.pin.is_some()
+                && usage.oauth_without_usage_pins.contains(&account.pin)
+                && !usage
+                    .accounts
+                    .iter()
+                    .any(|current| current.pin == account.pin)
+            {
+                usage.accounts.push(account);
+            }
+        }
+        let name = format!("{}.usage.json", target.cache_identity());
+        Self::atomic_replace(
+            &self.root.join(&name),
+            &self
+                .root
+                .join(format!(".{name}.{}.tmp", std::process::id())),
+            serde_json::to_vec(&usage)?,
+        )
+    }
+
     pub fn should_debounce_target(
         &self,
         target: &BillingTarget,
@@ -165,7 +223,9 @@ impl CacheStore {
             let same_account =
                 previous.usable_for_account(snapshot.account_id.as_deref(), credentials_mtime_unix);
             if same_account {
-                snapshot.merge_omitted_windows(&previous);
+                // Direct quota responses are authoritative. In particular,
+                // an older Codex cache may contain a window borrowed from an
+                // unattributed rollout; never carry it into a fresh reading.
                 // A refresh scoped to one pane's session still must not delete
                 // what it never looked at. An agent event names a single pane,
                 // so the fetch only enriches that session; every other pane's
@@ -684,6 +744,32 @@ impl CacheStore {
             .context("write refresh marker")
     }
 
+    pub fn mark_refresh_account(
+        &self,
+        provider: Provider,
+        now_unix: u64,
+        account: Option<&str>,
+    ) -> Result<()> {
+        self.mark_refresh(provider, now_unix)?;
+        fs::write(
+            self.root
+                .join(format!("{}.refresh-account", provider.source())),
+            serde_json::to_vec(&account)?,
+        )?;
+        Ok(())
+    }
+
+    pub fn last_refresh_account(&self, provider: Provider) -> Option<Option<String>> {
+        serde_json::from_slice(
+            &fs::read(
+                self.root
+                    .join(format!("{}.refresh-account", provider.source())),
+            )
+            .ok()?,
+        )
+        .ok()
+    }
+
     pub fn now_unix() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -827,6 +913,19 @@ fn merge_session_windows(
     session_id: Option<&str>,
     quota_scope: Option<&str>,
 ) {
+    if snapshot.session_quota_only {
+        if let Some(previous) = previous.filter(|previous| previous.session_quota_only) {
+            snapshot.session_windows = previous.session_windows.clone();
+        }
+        if let Some(id) = session_id {
+            snapshot
+                .session_windows
+                .insert(id.to_string(), snapshot.windows.clone());
+        }
+        snapshot.session_quota_scopes.clear();
+        snapshot.quota_scope_windows.clear();
+        return;
+    }
     if let Some(previous) = previous {
         for (session_id, windows) in &previous.session_windows {
             snapshot
@@ -1101,6 +1200,36 @@ mod tests {
         let cache = CacheStore::new(directory.path());
         cache.save(&snapshot()).unwrap();
         assert_eq!(cache.load(Provider::Grok).unwrap(), Some(snapshot()));
+    }
+
+    #[test]
+    fn omp_upgrade_preserves_only_an_explicitly_confirmed_failed_account() {
+        let directory = tempdir().unwrap();
+        let cache = CacheStore::new(directory.path());
+        let target = BillingTarget::omp("anthropic");
+        let mut previous = snapshot();
+        previous.account_id = Some("old-pin".into());
+        cache.save_target(&target, &previous).unwrap();
+        let usage = crate::providers::omp::ProviderUsage {
+            oauth_without_usage_pins: vec![Some("old-pin".into())],
+            ..Default::default()
+        };
+        cache.save_omp_usage(&target, &usage).unwrap();
+        let migrated = cache.load_omp_usage(&target).unwrap();
+        assert_eq!(migrated.accounts.len(), 1);
+        assert_eq!(migrated.accounts[0].windows, previous.windows);
+        cache.save_omp_usage(&target, &usage).unwrap();
+        assert_eq!(cache.load_omp_usage(&target).unwrap(), migrated);
+        cache
+            .save_omp_usage(
+                &target,
+                &crate::providers::omp::ProviderUsage {
+                    oauth_without_usage_pins: vec![Some("new-pin".into())],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(cache.load_omp_usage(&target).unwrap().accounts.is_empty());
     }
 
     #[test]
@@ -2035,7 +2164,7 @@ mod tests {
     }
 
     #[test]
-    fn same_account_still_restores_an_omitted_five_hour_window() {
+    fn a_fresh_api_read_removes_legacy_unattributed_windows() {
         let directory = tempdir().unwrap();
         let cache = CacheStore::new(directory.path());
         cache
@@ -2051,10 +2180,7 @@ mod tests {
             .save_preserving_diagnostics_for_sessions(&mut latest, &[], Some(900))
             .unwrap();
         let saved = cache.load(Provider::Codex).unwrap().unwrap();
-        assert_eq!(
-            saved.window(WindowKind::FiveHour).unwrap().used_percent,
-            22.0
-        );
+        assert!(saved.window(WindowKind::FiveHour).is_none());
         assert_eq!(saved.window(WindowKind::Weekly).unwrap().used_percent, 66.0);
     }
 

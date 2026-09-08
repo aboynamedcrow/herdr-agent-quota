@@ -93,8 +93,8 @@ pub fn startup(providers: &[Provider]) -> Result<()> {
     }
     // Handoff need not emit another idle -> working event. An existing
     // watcher adopts the saved environment; otherwise this starts one.
-    run(providers, false, false)?;
-    spawn_watch()
+    run(providers, true, false)?;
+    spawn_watch(false)
 }
 
 /// Refresh selected providers until their agents leave the working state.
@@ -107,12 +107,15 @@ pub fn startup(providers: &[Provider]) -> Result<()> {
 /// provider has its own non-blocking refresh lease, so slow I/O never stalls a
 /// statusLine hook or another provider. The existing provider-level debounce
 /// remains the lower bound for network requests.
-pub fn watch(providers: &[Provider], interval_seconds: Option<u64>) -> Result<()> {
+pub fn watch(providers: &[Provider], interval_seconds: Option<u64>, defer: bool) -> Result<()> {
     let cache = CacheStore::from_env()?;
     let interval_seconds = interval_seconds
         .map(CacheStore::validate_watch_interval_seconds)
         .transpose()?
         .unwrap_or_else(|| cache.watch_interval_seconds());
+    if !cache.root().is_dir() {
+        return Ok(());
+    }
     let Some(_lock) = cache.try_lock_named(TURN_WATCH_LOCK)? else {
         return Ok(());
     };
@@ -121,9 +124,18 @@ pub fn watch(providers: &[Provider], interval_seconds: Option<u64>) -> Result<()
     let started_at = SystemTime::now();
     let started_millis = CacheStore::now_millis();
     let interval = Duration::from_secs(interval_seconds);
-    let mut previous_active = Vec::new();
+    if defer {
+        wait_for_watch_tick(&cache, interval, started_at, started_millis);
+    }
+    let mut previous_active = event_json()
+        .as_ref()
+        .and_then(find_pane_id)
+        .map(str::to_string)
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut settling = BTreeMap::new();
     loop {
-        if cache.turn_watchers_stopped_after(started_millis)? {
+        if !cache.root().is_dir() || cache.turn_watchers_stopped_after(started_millis)? {
             break;
         }
         let server = WatchHerdrEnvironment::load(&cache);
@@ -141,48 +153,117 @@ pub fn watch(providers: &[Provider], interval_seconds: Option<u64>) -> Result<()
             if started.elapsed() >= MAX_ACTIVE_TURN_WATCH {
                 break;
             }
-            thread::sleep(interval);
+            wait_for_watch_tick(&cache, interval, started_at, started_millis);
             continue;
         };
-        let active = providers
+        let active = state
+            .working_pane_ids
             .iter()
-            .copied()
-            .filter(|provider| state.working_providers.contains(provider))
+            .filter(|id| {
+                state.panes.iter().any(|pane| {
+                    pane.pane_id == **id
+                        && (covers_every_collector(providers)
+                            || pane
+                                .harness
+                                .billing()
+                                .is_some_and(|p| providers.contains(&p)))
+                })
+            })
+            .cloned()
             .collect::<Vec<_>>();
-        let finishing = previous_active
-            .iter()
-            .copied()
-            .filter(|provider| !active.contains(provider))
-            .collect::<Vec<_>>();
-
-        // A provider can settle while another provider keeps working. Run one
-        // final debounced pass for providers that just transitioned to idle,
-        // then continue polling the remaining active set in the same process.
-        if !finishing.is_empty() {
-            let _ = refresh_and_publish(&cache, &finishing, false, &state.panes);
-        }
-        if active.is_empty() {
+        let now = CacheStore::now_unix();
+        let affected = watch_targets(&active, &previous_active, &mut settling, now);
+        let _ = refresh_working_panes(&cache, &state.panes, &affected);
+        if active.is_empty() && settling.is_empty() {
             break;
         }
-        let _ = refresh_and_publish(&cache, &active, false, &state.panes);
         previous_active = active;
         if started.elapsed() >= MAX_ACTIVE_TURN_WATCH {
             break;
         }
-        thread::sleep(interval);
+        wait_for_watch_tick(&cache, interval, started_at, started_millis);
     }
     Ok(())
 }
 
-fn refresh_and_publish(
+/// Include a settled pane in one pass after debounce expires, even while a
+/// different provider keeps working. Returning the final ids before retiring
+/// them is what prevents the completion reading from being dropped.
+fn watch_targets(
+    active: &[String],
+    previous: &[String],
+    settling: &mut BTreeMap<String, u64>,
+    now: u64,
+) -> Vec<String> {
+    for id in previous {
+        if !active.contains(id) {
+            settling.entry(id.clone()).or_insert(now);
+        }
+    }
+    settling.retain(|id, _| !active.contains(id));
+    let mut affected = active.to_vec();
+    affected.extend(settling.keys().cloned());
+    settling.retain(|_, finished| now.saturating_sub(*finished) < 60);
+    affected
+}
+
+fn wait_for_watch_tick(
     cache: &CacheStore,
-    providers: &[Provider],
-    force: bool,
+    interval: Duration,
+    started_at: SystemTime,
+    started_millis: u64,
+) {
+    let deadline = Instant::now() + interval;
+    while Instant::now() < deadline {
+        if !cache.root().is_dir()
+            || cache
+                .turn_watchers_stopped_after(started_millis)
+                .unwrap_or(false)
+            || watch_binary_is_newer(started_at, current_exe_modified())
+            || WatchHerdrEnvironment::load(cache)
+                .is_some_and(|server| server != WatchHerdrEnvironment::current())
+        {
+            break;
+        }
+        thread::sleep(
+            Duration::from_secs(1).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+}
+
+/// Refresh only targets with a working or just-finished pane, then publish
+/// that account reading to its siblings. Local transcript routing does not
+/// read terminal output or poll unrelated subscriptions.
+fn refresh_working_panes(
+    cache: &CacheStore,
     panes: &[AgentPane],
+    affected: &[String],
 ) -> Result<()> {
-    refresh_selected(cache, providers, force, panes)?;
-    let mut selected = panes_for_providers(panes, providers);
-    publish_resolved(cache, &mut selected, None)
+    let routes = panes.iter().map(route::resolve).collect::<Vec<_>>();
+    let mut targets = Vec::new();
+    for (pane, resolution) in panes.iter().zip(&routes) {
+        if affected.contains(&pane.pane_id) {
+            if let Resolution::Subscription(target) = resolution {
+                if !targets.contains(target) {
+                    targets.push(*target);
+                }
+            }
+        }
+    }
+    let mut selected = panes.iter().zip(routes).filter(|(pane, resolution)| {
+        affected.contains(&pane.pane_id) || matches!(resolution, Resolution::Subscription(target) if targets.contains(target))
+    }).map(|(pane, _)| pane.clone()).collect::<Vec<_>>();
+    let mut providers = Vec::new();
+    for provider in targets
+        .iter()
+        .filter_map(|target| target.original_provider())
+    {
+        if !providers.contains(&provider) {
+            providers.push(provider);
+        }
+    }
+    refresh_selected(cache, &providers, false, &selected)?;
+    publish_resolved(cache, &mut selected, None, false)
 }
 
 fn run_internal(
@@ -207,7 +288,7 @@ fn run_internal(
     } else {
         panes_for_providers(session_panes, providers)
     };
-    publish_resolved(&cache, &mut publish_panes, topic_pane)?;
+    publish_resolved(&cache, &mut publish_panes, topic_pane, force)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&outcomes)?);
     }
@@ -239,10 +320,8 @@ pub fn event() -> Result<()> {
     // their panes would add a visible repaint without improving attribution.
     let topic_pane = (!matches!(harness, Harness::Pi | Harness::Omp)).then_some(pane_id);
     let result = handle_named_pane(&cache, pane, topic_pane);
-    // OpenCode (and other non-collector harnesses) must not start the
-    // original-four all-provider watch.
-    if status.is_some_and(is_working_status) && harness.billing().is_some() {
-        if let Err(error) = spawn_watch() {
+    if status.is_some_and(is_working_status) {
+        if let Err(error) = spawn_watch(true) {
             if result.is_ok() {
                 return Err(error);
             }
@@ -310,6 +389,7 @@ fn handle_named_pane(cache: &CacheStore, pane: AgentPane, topic_pane: Option<&st
         resolved,
         CacheStore::now_unix(),
         style,
+        false,
     )?
     .into_iter()
     .collect::<Vec<_>>();
@@ -328,6 +408,7 @@ fn resolved_pane_tokens(
     resolved: route::ResolvedPane,
     now: u64,
     style: PercentStyle,
+    force: bool,
 ) -> Result<Option<PaneTokens>> {
     let route::ResolvedPane {
         resolution,
@@ -339,7 +420,7 @@ fn resolved_pane_tokens(
         Resolution::Subscription(target)
             if target.credential_scope == CredentialScope::OMP_STORE =>
         {
-            omp_quota(cache, &target, omp.as_ref(), now, style)
+            omp_quota(cache, &target, omp.as_ref(), now, style, force)
         }
         Resolution::Subscription(target) => {
             if let Some(provider) = target.original_provider() {
@@ -369,10 +450,13 @@ fn resolved_pane_tokens(
                 // Not one of the original four, so it is never fetched by the
                 // provider list: this pane resolved to it, so this pane pays
                 // for at most one debounced request.
-                refresh_scoped_target(cache, &target);
+                refresh_scoped_target(cache, &target, force);
                 let snapshot = cache.load(target.billing)?;
-                tokens_for_provider(
+                let usable = load_usable_snapshot(cache, target.billing)?;
+                tokens_for_loaded_snapshot(
+                    target.billing,
                     snapshot.as_ref(),
+                    usable.as_ref(),
                     now,
                     pane.session.as_ref().and_then(|session| session.id()),
                     style,
@@ -384,7 +468,9 @@ fn resolved_pane_tokens(
             Some(PaneQuotaUpdate::Clear)
         }
         Resolution::NoSubscription => None,
-        Resolution::Indeterminate if identity.is_some() => Some(PaneQuotaUpdate::Preserve),
+        Resolution::Indeterminate if plugin_quota_present(&pane.tokens) || identity.is_some() => {
+            Some(PaneQuotaUpdate::Clear)
+        }
         Resolution::Indeterminate => None,
     };
     if quota.is_none() && (identity.is_some() || context.is_some()) {
@@ -410,9 +496,18 @@ fn omp_quota(
     evidence: Option<&OmpEvidence>,
     now: u64,
     style: PercentStyle,
+    force: bool,
 ) -> Option<PaneQuotaUpdate> {
     let evidence = evidence?;
-    omp_quota_with_refresh(cache, target, evidence, now, style, refresh_omp_target)
+    omp_quota_with_refresh(
+        cache,
+        target,
+        evidence,
+        now,
+        style,
+        force,
+        refresh_omp_target,
+    )
 }
 
 fn omp_quota_with_refresh(
@@ -421,22 +516,41 @@ fn omp_quota_with_refresh(
     evidence: &OmpEvidence,
     now: u64,
     style: PercentStyle,
+    force: bool,
     refresh: impl FnOnce(&CacheStore, &BillingTarget, &OmpEvidence, u64) -> OmpUsage,
 ) -> Option<PaneQuotaUpdate> {
     let pin = evidence.account_pin.as_deref();
-    let cached = cache
-        .load_target(target)
-        .ok()
-        .flatten()
-        .filter(|snapshot| snapshot.usable_for_account(pin, None));
+    let report = cache.load_omp_usage(target);
+    let legacy = cache.load_target(target).ok().flatten();
+    let cached = report
+        .as_ref()
+        .and_then(|usage| omp_provider::select_account(usage, pin))
+        .map(|account| omp_provider::snapshot(target, account))
+        .or_else(|| {
+            if report.is_some() {
+                return None;
+            }
+            legacy
+                .as_ref()
+                .filter(|snapshot| snapshot.usable_for_account(pin, None))
+                .cloned()
+        });
+    let unavailable = || {
+        Some(PaneQuotaUpdate::Replace(Box::new(
+            MetadataTokens::unavailable(target.billing, "quota account is not confirmed"),
+        )))
+    };
     let debounced = cache
         .should_debounce_target(target, now, 60)
         .unwrap_or(false);
-    if debounced {
-        return cached.as_ref().and_then(|snapshot| {
-            tokens_for_provider(Some(snapshot), now, None, style)
-                .map(|values| PaneQuotaUpdate::Replace(Box::new(values)))
-        });
+    if debounced && !force {
+        return cached
+            .as_ref()
+            .and_then(|snapshot| {
+                tokens_for_provider(Some(snapshot), now, None, style)
+                    .map(|values| PaneQuotaUpdate::Replace(Box::new(values)))
+            })
+            .or_else(unavailable);
     }
     match refresh(cache, target, evidence, now) {
         OmpUsage::Account(snapshot) => tokens_for_provider(Some(&snapshot), now, None, style)
@@ -448,10 +562,13 @@ fn omp_quota_with_refresh(
         OmpUsage::Unavailable if cached.is_none() => Some(PaneQuotaUpdate::Replace(Box::new(
             MetadataTokens::unavailable(target.billing, "omp reported no quota data"),
         ))),
-        OmpUsage::Unavailable | OmpUsage::Unknown => cached.as_ref().and_then(|snapshot| {
-            tokens_for_provider(Some(snapshot), now, None, style)
-                .map(|values| PaneQuotaUpdate::Replace(Box::new(values)))
-        }),
+        OmpUsage::Unavailable | OmpUsage::Unknown => cached
+            .as_ref()
+            .and_then(|snapshot| {
+                tokens_for_provider(Some(snapshot), now, None, style)
+                    .map(|values| PaneQuotaUpdate::Replace(Box::new(values)))
+            })
+            .or_else(unavailable),
     }
 }
 
@@ -486,6 +603,9 @@ fn refresh_omp_target(
     let Ok(usage) = omp_provider::fetch(&evidence.paths, &evidence.provider_id, now) else {
         return OmpUsage::Unknown;
     };
+    if cache.save_omp_usage(target, &usage).is_err() {
+        return OmpUsage::Unknown;
+    }
     let Some(account) = omp_provider::select_account(&usage, evidence.account_pin.as_deref())
     else {
         if omp_provider::oauth_without_usage_matches(&usage, evidence.account_pin.as_deref()) {
@@ -494,7 +614,10 @@ fn refresh_omp_target(
         // Several accounts and no pin is not a coin flip either: only a
         // provider that has an API key and nothing else is proved to be
         // pay-as-you-go.
-        return if usage.accounts.is_empty() && usage.has_api_key {
+        return if usage.accounts.is_empty()
+            && usage.oauth_without_usage_pins.is_empty()
+            && usage.has_api_key
+        {
             OmpUsage::PayAsYouGo
         } else {
             OmpUsage::Unknown
@@ -513,9 +636,9 @@ fn refresh_omp_target(
 /// this same target rather than being cleared, and a missing key is a normal
 /// state (the user may not have a Go subscription) rather than an error worth
 /// surfacing on every event.
-fn refresh_scoped_target(cache: &CacheStore, target: &BillingTarget) {
+fn refresh_scoped_target(cache: &CacheStore, target: &BillingTarget, force: bool) {
     let now = CacheStore::now_unix();
-    if should_skip_fetch(cache, target.billing, false, now).unwrap_or(true) {
+    if should_skip_fetch(cache, target.billing, force, now).unwrap_or(true) {
         return;
     }
     let Ok(Some(_lease)) = cache.try_lock_target_refresh(target) else {
@@ -529,7 +652,14 @@ fn refresh_scoped_target(cache: &CacheStore, target: &BillingTarget) {
     };
     // Marked before the request so a failing endpoint cannot be retried on
     // every event; the debounce window applies to attempts, not successes.
-    if cache.mark_refresh(target.billing, now).is_err() {
+    if cache
+        .mark_refresh_account(
+            target.billing,
+            now,
+            Some(&crate::providers::credential_id(&key)),
+        )
+        .is_err()
+    {
         return;
     }
     if let Ok(snapshot) = opencode_go::fetch(&key) {
@@ -619,6 +749,8 @@ fn refresh_provider(
                 .map(str::to_string)
         })
         .collect::<Vec<_>>();
+    let (account_id, _) = current_account_gate(provider);
+    cache.mark_refresh_account(provider, now, account_id.as_deref())?;
     let fetched = match provider {
         Provider::Codex => codex::fetch_for_sessions(&session_ids).map(FetchedSnapshot::direct),
         Provider::Grok => grok::fetch_for_sessions(&session_ids).map(FetchedSnapshot::direct),
@@ -630,7 +762,6 @@ fn refresh_provider(
             "scoped providers are refreshed per resolved pane, not through --provider"
         )),
     };
-    cache.mark_refresh(provider, now)?;
     match fetched {
         Ok(fetched) => {
             let FetchedSnapshot {
@@ -672,10 +803,28 @@ fn should_skip_fetch(
     force: bool,
     now_unix: u64,
 ) -> Result<bool> {
+    let (account, mtime) = current_account_gate(provider);
+    should_skip_fetch_for_account(cache, provider, force, now_unix, account.as_deref(), mtime)
+}
+
+fn should_skip_fetch_for_account(
+    cache: &CacheStore,
+    provider: Provider,
+    force: bool,
+    now_unix: u64,
+    account: Option<&str>,
+    mtime: Option<u64>,
+) -> Result<bool> {
     if force || !cache.should_debounce(provider, now_unix, 60)? {
         return Ok(false);
     }
-    if load_usable_snapshot(cache, provider)?.is_some() {
+    if let Some(attempted) = cache.last_refresh_account(provider) {
+        return Ok(attempted.as_deref() == account);
+    }
+    if cache
+        .load(provider)?
+        .is_some_and(|snapshot| snapshot.usable_for_account(account, mtime))
+    {
         return Ok(true);
     }
     // No snapshot at all: keep debounce so missing credentials do not hammer
@@ -704,13 +853,19 @@ fn current_account_gate(provider: Provider) -> (Option<String>, Option<u64>) {
             let account_id = path
                 .as_ref()
                 .and_then(|path| grok::read_credentials(path).ok())
-                .and_then(|credentials| credentials.user_id);
+                .map(|credentials| credentials.account_id());
             let mtime = path.as_ref().and_then(|path| grok::auth_mtime_unix(path));
             (account_id, mtime)
         }
         Provider::Codex => (codex::current_account_id(), codex::auth_mtime_unix()),
         Provider::Devin => (devin::current_account_id(), devin::auth_mtime_unix()),
-        Provider::Claude | Provider::Agy | Provider::OpenCodeGo | Provider::Omp => (None, None),
+        Provider::OpenCodeGo => (
+            OpenCodePaths::from_env()
+                .and_then(|paths| crate::opencode::go_key(&paths))
+                .map(|key| crate::providers::credential_id(&key)),
+            None,
+        ),
+        Provider::Claude | Provider::Agy | Provider::Omp => (None, None),
     }
 }
 
@@ -725,6 +880,19 @@ fn load_statusline_snapshot(cache: &CacheStore, provider: Provider) -> Result<Fe
         })?;
     let mut snapshot = observation.snapshot;
     let value = observation.payload;
+    if !snapshot.session_quota_only {
+        // Migrate from the original raw observation, not legacy windows
+        // merged across a profile. No credential or session reset is needed.
+        snapshot = match provider {
+            Provider::Claude => {
+                crate::providers::claude::parse_statusline(&value, snapshot.fetched_at_unix)?
+            }
+            Provider::Agy => {
+                crate::providers::agy::parse_statusline(&value, snapshot.fetched_at_unix)?
+            }
+            _ => snapshot,
+        };
+    }
     let previous_cache = cache
         .load(provider)
         .ok()
@@ -758,6 +926,7 @@ fn publish_resolved(
     cache: &CacheStore,
     panes: &mut [AgentPane],
     topic_pane: Option<&str>,
+    force: bool,
 ) -> Result<()> {
     if let Some(pane) =
         topic_pane.and_then(|pane_id| panes.iter_mut().find(|pane| pane.pane_id == pane_id))
@@ -767,9 +936,18 @@ fn publish_resolved(
     let mut tokens = Vec::new();
     let now = CacheStore::now_unix();
     let style = cache.percent_style().unwrap_or_default();
+    let mut refreshed_targets = Vec::new();
     for pane in panes.iter_mut() {
+        let resolved = route::resolve_with_identity(pane);
+        let force_target = if let Resolution::Subscription(target) = &resolved.resolution {
+            let first = !refreshed_targets.contains(target);
+            refreshed_targets.push(*target);
+            force && first
+        } else {
+            false
+        };
         if let Some(pane_tokens) =
-            resolved_pane_tokens(cache, pane, route::resolve_with_identity(pane), now, style)?
+            resolved_pane_tokens(cache, pane, resolved, now, style, force_target)?
         {
             tokens.push(pane_tokens);
         }
@@ -923,7 +1101,7 @@ fn reexec_watch(server: Option<&WatchHerdrEnvironment>, interval_seconds: u64) -
     }
 }
 
-fn spawn_watch() -> Result<()> {
+fn spawn_watch(defer: bool) -> Result<()> {
     let executable = std::env::current_exe().context("resolve plugin executable")?;
     let mut command = Command::new(executable);
     command
@@ -931,6 +1109,9 @@ fn spawn_watch() -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if defer {
+        command.arg("--defer");
+    }
     #[cfg(unix)]
     unsafe {
         // A Herdr event process is short-lived. Put the watcher in its own
@@ -1007,6 +1188,172 @@ mod tests {
             .iter()
             .map(|(provider, headroom)| ((*provider).to_string(), *headroom))
             .collect()
+    }
+
+    #[test]
+    fn failed_new_login_attempts_are_debounced_without_reusing_old_quota() {
+        let dir = tempdir().unwrap();
+        let cache = CacheStore::new(dir.path());
+        for provider in [
+            Provider::Codex,
+            Provider::Grok,
+            Provider::Devin,
+            Provider::OpenCodeGo,
+        ] {
+            cache
+                .save(
+                    &ProviderSnapshot::new(provider, vec![], 90)
+                        .with_account_id(Some("old".into())),
+                )
+                .unwrap();
+            cache
+                .mark_refresh_account(provider, 100, Some("old"))
+                .unwrap();
+            assert!(!should_skip_fetch_for_account(
+                &cache,
+                provider,
+                false,
+                110,
+                Some("new"),
+                None
+            )
+            .unwrap());
+            cache
+                .mark_refresh_account(provider, 110, Some("new"))
+                .unwrap();
+            assert!(
+                should_skip_fetch_for_account(&cache, provider, false, 120, Some("new"), None)
+                    .unwrap()
+            );
+            assert!(!cache
+                .load(provider)
+                .unwrap()
+                .unwrap()
+                .usable_for_account(Some("new"), None));
+            assert!(!should_skip_fetch_for_account(
+                &cache,
+                provider,
+                false,
+                170,
+                Some("new"),
+                None
+            )
+            .unwrap());
+            assert!(
+                !should_skip_fetch_for_account(&cache, provider, true, 120, Some("new"), None)
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn a_settled_provider_gets_a_pass_after_debounce_while_another_keeps_working() {
+        let a = "codex-pane".to_string();
+        let b = "omp-pane".to_string();
+        let mut settling = BTreeMap::new();
+        assert!(watch_targets(
+            std::slice::from_ref(&b),
+            &[a.clone(), b.clone()],
+            &mut settling,
+            10
+        )
+        .contains(&a));
+        assert!(watch_targets(
+            std::slice::from_ref(&b),
+            std::slice::from_ref(&b),
+            &mut settling,
+            40
+        )
+        .contains(&a));
+        assert!(watch_targets(
+            std::slice::from_ref(&b),
+            std::slice::from_ref(&b),
+            &mut settling,
+            70
+        )
+        .contains(&a));
+        assert!(settling.is_empty());
+        assert!(!watch_targets(
+            std::slice::from_ref(&b),
+            std::slice::from_ref(&b),
+            &mut settling,
+            100
+        )
+        .contains(&a));
+    }
+
+    #[test]
+    fn omp_panes_keep_both_accounts_from_one_debounced_report() {
+        let dir = tempdir().unwrap();
+        let cache = CacheStore::new(dir.path());
+        let target = BillingTarget::omp("anthropic");
+        let mut usage = omp_provider::ProviderUsage::default();
+        for (pin, used) in [("a", 20.0), ("b", 80.0)] {
+            usage.accounts.push(omp_provider::AccountUsage {
+                pin: Some(pin.to_string()),
+                windows: vec![UsageWindow::new(WindowKind::Weekly, used, None).unwrap()],
+                fetched_at_unix: 100,
+            });
+        }
+        cache.save_omp_usage(&target, &usage).unwrap();
+        cache.mark_refresh_target(&target, 100).unwrap();
+        for (pin, expected) in [
+            ("a", "7d 80%"),
+            ("b", "7d 20%"),
+            ("a", "7d 80%"),
+            ("unknown", "7d N/A"),
+        ] {
+            let evidence = OmpEvidence {
+                paths: crate::omp::OmpPaths {
+                    agent_dir: dir.path().into(),
+                    sessions: dir.path().join("sessions"),
+                },
+                provider_id: "anthropic".to_string(),
+                account_pin: Some(pin.to_string()),
+            };
+            let update = omp_quota_with_refresh(
+                &cache,
+                &target,
+                &evidence,
+                110,
+                PercentStyle::default(),
+                false,
+                |_, _, _, _| panic!("must not spawn once per account"),
+            );
+            assert!(
+                matches!(update, Some(PaneQuotaUpdate::Replace(values)) if values.quota_week == expected)
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_statusline_mailbox_is_migrated_from_raw_session_evidence() {
+        let dir = tempdir().unwrap();
+        let cache = CacheStore::new(dir.path());
+        let legacy = serde_json::json!({
+            "snapshot": { "provider":"claude", "source":"claude-statusline", "fetched_at_unix":100,
+                "windows": [{"kind":"weekly","used_percent":99.0,"remaining_percent":1.0}],
+                "session_windows": {"other":[{"kind":"weekly","used_percent":99.0,"remaining_percent":1.0}]}
+            },
+            "payload": {"session_id":"current", "rate_limits":{"seven_day":{"used_percentage":20.0}}}
+        });
+        std::fs::write(
+            dir.path().join("claude-statusline.observation.json"),
+            legacy.to_string(),
+        )
+        .unwrap();
+        let fetched = load_statusline_snapshot(&cache, Provider::Claude).unwrap();
+        assert!(fetched.snapshot.session_quota_only);
+        assert_eq!(
+            fetched
+                .snapshot
+                .window(WindowKind::Weekly)
+                .unwrap()
+                .used_percent,
+            20.0
+        );
+        assert!(fetched.snapshot.session_windows.is_empty());
+        assert_eq!(fetched.session_id.as_deref(), Some("current"));
     }
 
     #[test]
@@ -1127,6 +1474,7 @@ mod tests {
             &evidence,
             100,
             PercentStyle::default(),
+            false,
             |_, _, _, _| OmpUsage::Unavailable,
         )
         .expect("explicit unavailable update");
@@ -1160,9 +1508,12 @@ mod tests {
             &evidence,
             120,
             PercentStyle::default(),
+            false,
             |_, _, _, _| panic!("debounced refresh must not run"),
         );
-        assert!(update.is_none());
+        assert!(
+            matches!(update, Some(PaneQuotaUpdate::Replace(values)) if values.quota_error.is_some())
+        );
     }
 
     #[test]
@@ -1191,6 +1542,7 @@ mod tests {
             &evidence,
             200,
             PercentStyle::default(),
+            false,
             |_, _, _, _| OmpUsage::Unavailable,
         )
         .expect("last good update");

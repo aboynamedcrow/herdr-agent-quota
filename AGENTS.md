@@ -87,18 +87,23 @@ Concretely, this means:
 
 `startup` exists because Herdr drops plugin-owned Agent views when the server
 exits, and startup hooks run again after a restart or a live handoff. It
-restores what this plugin owns and then does exactly what `refresh` does. Put
-anything that must survive a Herdr restart there, not in `refresh`.
+restores plugin-owned views, forces one quota refresh, and restores the watcher.
+Plugin enable alone does not run startup; the configure action runs it after
+repair. Server-owned event/refresh paths also record the current Herdr binary
+and socket so an older watcher can adopt the new connection.
 
 `pane.agent_status_changed` fires **twice per turn** (idle→working on submit,
 working→idle on completion). Anything `event` does, the user pays for twice
 every time they press Enter. Budget accordingly.
 
 The working event starts one global `watch` pulse. It calls `herdr agent list`
-once per configured interval, refreshes every working provider in that pass,
-publishes without reading pane output, and exits after all agents settle. The
-interval defaults to 60 seconds and is bounded to 30 seconds–1 hour. Uninstall
-writes a stop marker so a detached watcher cannot survive a restore.
+once per configured interval for every supported harness, including Pi, OMP,
+and OpenCode. Event-spawned watchers defer their first poll. They resolve local
+billing targets, refresh active/settling targets, and publish to siblings with
+the same target without reading terminal output. A finishing target stays in
+the pass until the 60-second debounce has elapsed. The interval defaults to
+60 seconds and is bounded to 30 seconds–1 hour. Local stop/connection checks
+interrupt sleeps without polling Herdr. Uninstall writes a stop marker.
 
 ## omp's quota does not come from a provider endpoint
 
@@ -115,7 +120,7 @@ Three properties hold that together, and each one is load bearing:
    subscription the user has in omp, on a pane event.
 2. **Two caches, deliberately.** omp answers from its own five-minute usage
    cache in `agent.db`; on top of that this plugin debounces to 60 seconds per
-   target and stores the resulting snapshot. Neither layer may be removed on
+   target and stores the sanitized report for all accounts returned by that one provider. Neither layer may be removed on
    the theory that the other covers it — omp's cache is what stops a provider
    request, ours is what stops a process spawn.
 3. **`agent.db` is never opened.** It holds live OAuth tokens. Everything
@@ -135,6 +140,22 @@ report's identity. That digest is omp's persisted contract — if it changes
 upstream, every pin is orphaned and multi-account panes silently fall back to
 "no quota". The pinned-digest test exists to make that a test failure rather
 than a wrong number.
+
+## Quota attribution and cache upgrades
+
+- Direct API snapshots carry an account ID or credential hash. Unstamped old
+  caches cannot prove a current login. A failed attempt is debounced by the
+  attempted identity; a different login can refresh immediately.
+- Codex rollouts provide diagnostics only. Fresh API windows replace old
+  windows, including ones an older plugin borrowed from a rollout.
+- Claude/Agy StatusLine has no reliable serving-account ID. New observations
+  carry `session_quota_only`; they never share windows by profile directory.
+  Rebuild old mailboxes from their raw payload, not merged profile windows.
+- Agy must identify the active pool or receive only one possible pool. Do not
+  combine Gemini and third-party quotas for an unknown model.
+- OMP stores all accounts in one sanitized provider report so a second pin
+  does not lose its quota during debounce. Select by pin; keep a failed
+  account's old reading only while the report still identifies that account.
 
 ## Devin's per-session model is local SQLite, not the quota API
 

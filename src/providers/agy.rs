@@ -46,8 +46,7 @@ impl Pool {
 /// Gemini-family model names contain `gemini`, `flash`, or `learnlm`.
 /// Third-party model names include Claude variants (`claude`, `sonnet`,
 /// `haiku`, `opus`), GPT models, and OpenAI reasoning series (`o1`, `o3`,
-/// `o4`). Returns `None` for unrecognised names so the caller falls back to
-/// the conservative minimum across both pools.
+/// `o4`). Unknown names require an unambiguous single-pool response.
 fn active_pool(model: Option<&str>) -> Option<Pool> {
     let lower = model?.to_ascii_lowercase();
     if lower.contains("gemini") || lower.contains("flash") || lower.contains("learnlm") {
@@ -72,8 +71,7 @@ fn active_pool(model: Option<&str>) -> Option<Pool> {
 /// Agy reports separate Gemini and third-party (Claude/GPT) pools. When the
 /// active model can be identified, only its pool's quota is shown so the
 /// sidebar reflects the limit that actually applies to the current session.
-/// For unrecognised model names the sidebar falls back to the conservative
-/// minimum across both pools.
+/// An unknown model with two possible pools supplies diagnostics only.
 pub fn parse_statusline(
     value: &Value,
     fetched_at_unix: u64,
@@ -83,9 +81,21 @@ pub fn parse_statusline(
         .and_then(Value::as_object)
         .ok_or_else(|| ProviderError::UnsupportedResponse("missing quota".to_string()))?;
     let model = parse_model(value);
-    let pool = active_pool(model.as_deref());
-    let five_hour_keys: &[&str] = pool.map_or(&FIVE_HOUR_KEYS, Pool::five_hour_keys);
-    let weekly_keys: &[&str] = pool.map_or(&WEEKLY_KEYS, Pool::weekly_keys);
+    let has_gemini = FIVE_HOUR_KEYS[..1]
+        .iter()
+        .chain(WEEKLY_KEYS[..1].iter())
+        .any(|key| quota.contains_key(*key));
+    let has_third_party = FIVE_HOUR_KEYS[1..]
+        .iter()
+        .chain(WEEKLY_KEYS[1..].iter())
+        .any(|key| quota.contains_key(*key));
+    let pool = active_pool(model.as_deref()).or(match (has_gemini, has_third_party) {
+        (true, false) => Some(Pool::Gemini),
+        (false, true) => Some(Pool::ThirdParty),
+        _ => None,
+    });
+    let five_hour_keys: &[&str] = pool.map_or(&[] as &[&str], Pool::five_hour_keys);
+    let weekly_keys: &[&str] = pool.map_or(&[] as &[&str], Pool::weekly_keys);
     let mut windows = Vec::new();
     for (kind, keys) in [
         (WindowKind::FiveHour, five_hour_keys),
@@ -95,13 +105,14 @@ pub fn parse_statusline(
             windows.push(window);
         }
     }
-    if windows.is_empty() {
+    if windows.is_empty() && (pool.is_some() || (!has_gemini && !has_third_party)) {
         return Err(ProviderError::UnsupportedResponse(
             "quota has no supported windows".to_string(),
         ));
     }
     Ok(
         ProviderSnapshot::new(Provider::Agy, windows, fetched_at_unix)
+            .session_local()
             .with_model(model)
             .with_context(
                 parse_context(
@@ -198,8 +209,9 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn parses_both_agy_windows_from_official_quota_keys() {
+    fn parses_both_agy_windows_from_the_active_pool() {
         let value = json!({
+            "model": {"display_name": "Claude Sonnet"},
             "quota": {
                 "gemini-5h": {"remaining_fraction": 0.9969, "reset_time": "2026-08-15T12:00:00Z"},
                 "gemini-weekly": {"remaining_fraction": 0.8, "reset_time": "2026-08-22T12:00:00Z"},
@@ -337,9 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_conservative_min_for_unknown_model() {
-        // Unrecognised model → min(gemini-5h=90 %, 3p-5h=30 %) = 30 % with
-        // the 3p-5h reset timestamp.
+    fn an_unknown_model_does_not_mix_two_quota_pools() {
         let value = json!({
             "model": {"display_name": "Future Model XYZ"},
             "quota": {
@@ -348,11 +358,7 @@ mod tests {
             }
         });
         let snapshot = parse_statusline(&value, 0).unwrap();
-        assert_eq!(
-            snapshot.window(WindowKind::FiveHour).unwrap().resets_at,
-            Some(ResetAt::from_unix_seconds(5000))
-        );
-        assert_remaining_pct(&snapshot, WindowKind::FiveHour, 30.0);
+        assert!(snapshot.windows.is_empty());
     }
 
     #[test]

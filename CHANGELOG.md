@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Recover background quota updates across Herdr upgrades and live handoffs;
+  normal installation/repair restores the watcher and retains preferences.
+- Include Pi, OMP, and OpenCode in active-turn polling and complete a delayed
+  final refresh when a turn ends inside the request debounce window.
+- Bind OpenCode Go and ID-less Grok caches to their credentials; retain OMP
+  readings for all reported account pins without spawning once per account.
+- Remove unverified Codex rollout windows and rebuild legacy quota data from
+  authoritative API responses or original StatusLine payloads.
+
+### Changed
+
+- Claude/Agy quota is session-local because StatusLine does not prove account
+  identity. An unknown Agy model no longer combines two quota pools.
+- Consolidate English/Chinese usage and upgrade documentation; separate dated
+  research from current guidance and remove the completed internal task plan.
+
 ## [1.5.0] - 2026-09-08
 
 ### Changed

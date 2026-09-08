@@ -130,6 +130,7 @@ pub struct AgentPane {
 pub struct AgentState {
     pub panes: Vec<AgentPane>,
     pub working_providers: Vec<Provider>,
+    pub working_pane_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -260,9 +261,14 @@ pub fn list_agent_state() -> Result<AgentState> {
     collect_agent_panes(&value, &mut panes);
     panes.sort_by(|left, right| left.pane_id.cmp(&right.pane_id));
     panes.dedup_by(|left, right| left.pane_id == right.pane_id);
+    let mut working_pane_ids = Vec::new();
+    collect_working_providers(&value, &mut Vec::new(), &mut working_pane_ids);
+    working_pane_ids.sort();
+    working_pane_ids.dedup();
     Ok(AgentState {
         panes,
         working_providers: working_providers_from(&value),
+        working_pane_ids,
     })
 }
 
@@ -388,7 +394,7 @@ fn collect_agent_panes(value: &Value, panes: &mut Vec<AgentPane>) {
 
 fn working_providers_from(value: &Value) -> Vec<Provider> {
     let mut providers = Vec::new();
-    collect_working_providers(value, &mut providers);
+    collect_working_providers(value, &mut providers, &mut Vec::new());
     providers.sort_by_key(|provider| {
         Provider::ALL
             .iter()
@@ -398,7 +404,11 @@ fn working_providers_from(value: &Value) -> Vec<Provider> {
     providers
 }
 
-fn collect_working_providers(value: &Value, providers: &mut Vec<Provider>) {
+fn collect_working_providers(
+    value: &Value,
+    providers: &mut Vec<Provider>,
+    pane_ids: &mut Vec<String>,
+) {
     match value {
         Value::Object(map) => {
             let kind = map
@@ -419,18 +429,27 @@ fn collect_working_providers(value: &Value, providers: &mut Vec<Provider>) {
                 .and_then(Value::as_str);
             if let (Some(kind), Some(status)) = (kind, status) {
                 if status.eq_ignore_ascii_case("working") {
+                    if Harness::from_agent_name(kind).is_some() {
+                        if let Some(pane_id) = map
+                            .get("pane_id")
+                            .or_else(|| map.get("paneId"))
+                            .and_then(Value::as_str)
+                        {
+                            pane_ids.push(pane_id.to_string());
+                        }
+                    }
                     if let Some(provider) = Harness::billing_for_agent(kind) {
                         providers.push(provider);
                     }
                 }
             }
             for child in map.values() {
-                collect_working_providers(child, providers);
+                collect_working_providers(child, providers, pane_ids);
             }
         }
         Value::Array(values) => {
             for child in values {
-                collect_working_providers(child, providers);
+                collect_working_providers(child, providers, pane_ids);
             }
         }
         _ => {}

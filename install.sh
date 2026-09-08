@@ -193,4 +193,4 @@ write_plugin_pref low-quota-alert "$LOW_QUOTA_ALERT"
 printf '%s\n' '→ installing reversible sidebar and provider collectors'
 invoke_action_and_wait configure || die "configuration action failed"
 
-printf '%s\n' 'Installed. Restart already-running agent sessions once so they load the refreshed hooks.'
+printf '%s\n' 'Installed / updated. Existing preferences are retained and quota refresh is restored. Restart sessions only to load newly added hooks or integrations.'

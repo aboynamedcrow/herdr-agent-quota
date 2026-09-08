@@ -38,6 +38,9 @@ pub enum Command {
         /// Override the configured poll interval for this run.
         #[arg(long)]
         interval_seconds: Option<u64>,
+        /// Internal: the event already refreshed its named pane.
+        #[arg(long, hide = true)]
+        defer: bool,
     },
     /// Herdr startup hook: restore plugin-owned Herdr state, then refresh.
     ///

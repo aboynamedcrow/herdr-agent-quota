@@ -1,7 +1,7 @@
 use super::statusline::{settings_path, Adapter};
 use crate::cache::{CacheStore, DEFAULT_WATCH_INTERVAL_SECONDS};
 use crate::model::Provider;
-use crate::providers::claude::{parse_statusline, quota_scope_id};
+use crate::providers::claude::parse_statusline;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::io::{Read, Write};
@@ -73,17 +73,7 @@ pub fn run_statusline_hook() -> Result<()> {
     if let Ok(value) = serde_json::from_slice::<Value>(&input) {
         if let Ok(snapshot) = parse_statusline(&value, CacheStore::now_unix()) {
             if let Ok(cache) = CacheStore::from_env() {
-                let quota_scope = quota_scope_id(
-                    std::env::var_os("CLAUDE_CONFIG_DIR").as_deref(),
-                    std::env::var_os("HOME").as_deref(),
-                    std::env::current_dir().ok().as_deref(),
-                );
-                let _ = cache.save_statusline_observation_with_quota_scope(
-                    Provider::Claude,
-                    snapshot,
-                    &value,
-                    quota_scope.as_deref(),
-                );
+                let _ = cache.save_statusline_observation(Provider::Claude, snapshot, &value);
             }
         }
     }

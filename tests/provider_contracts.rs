@@ -85,8 +85,10 @@ fn claude_fixture_contains_both_subscription_windows() {
 }
 
 #[test]
-fn agy_fixture_aggregates_gemini_and_third_party_windows() {
-    let value = fixture(include_str!("fixtures/agy/statusline-both.json"));
+fn agy_fixture_requires_an_identifiable_pool() {
+    let mut value = fixture(include_str!("fixtures/agy/statusline-both.json"));
+    assert!(agy::parse_statusline(&value, 1).unwrap().windows.is_empty());
+    value["model"] = serde_json::json!({"display_name": "Gemini Flash"});
     let snapshot = agy::parse_statusline(&value, 1).unwrap();
     assert_eq!(snapshot.windows.len(), 2);
     assert!(

@@ -556,6 +556,11 @@ impl CacheUsage {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderSnapshot {
+    /// StatusLine quota has no serving-account proof and is session-local.
+    /// False on old caches so they can be refreshed without trusting shared
+    /// profile windows from an earlier plugin version.
+    #[serde(default)]
+    pub session_quota_only: bool,
     pub provider: Provider,
     pub source: String,
     pub fetched_at_unix: u64,
@@ -614,6 +619,7 @@ pub struct ProviderSnapshot {
 impl ProviderSnapshot {
     pub fn new(provider: Provider, windows: Vec<UsageWindow>, fetched_at_unix: u64) -> Self {
         Self {
+            session_quota_only: false,
             provider,
             source: provider.source().to_string(),
             fetched_at_unix,
@@ -632,6 +638,11 @@ impl ProviderSnapshot {
 
     pub fn with_context(mut self, context: Option<ContextUsage>) -> Self {
         self.context = context;
+        self
+    }
+
+    pub fn session_local(mut self) -> Self {
+        self.session_quota_only = true;
         self
     }
 
@@ -691,6 +702,12 @@ impl ProviderSnapshot {
     /// 5. Keyed maps exist but this session is unknown → empty. A missing
     ///    session must not borrow another account's numbers.
     pub fn windows_for_session(&self, session_id: Option<&str>) -> &[UsageWindow] {
+        if self.session_quota_only {
+            return session_id
+                .and_then(|id| self.session_windows.get(id))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+        }
         let Some(session_id) = session_id else {
             return &self.windows;
         };
@@ -729,10 +746,17 @@ impl ProviderSnapshot {
         current_account_id: Option<&str>,
         credentials_mtime_unix: Option<u64>,
     ) -> bool {
+        if matches!(self.provider, Provider::Claude | Provider::Agy)
+            && self.account_id.is_none()
+            && !self.session_quota_only
+        {
+            return false;
+        }
         match (self.account_id.as_deref(), current_account_id) {
             (Some(saved), Some(current)) => saved == current,
             (Some(_), None) => false,
-            (None, Some(_)) | (None, None) => {
+            (None, Some(_)) => false,
+            (None, None) => {
                 credentials_mtime_unix.is_none_or(|mtime| mtime <= self.fetched_at_unix)
             }
         }
@@ -1009,8 +1033,8 @@ mod tests {
     fn legacy_snapshot_is_dropped_when_credentials_are_newer_than_the_fetch() {
         let snapshot = ProviderSnapshot::new(Provider::Grok, vec![], 100);
         assert!(!snapshot.usable_for_account(Some("account-b"), Some(150)));
-        assert!(snapshot.usable_for_account(Some("account-b"), Some(100)));
-        assert!(snapshot.usable_for_account(Some("account-b"), Some(50)));
+        assert!(!snapshot.usable_for_account(Some("account-b"), Some(100)));
+        assert!(!snapshot.usable_for_account(Some("account-b"), Some(50)));
         assert!(!snapshot.usable_for_account(None, Some(150)));
         assert!(snapshot.usable_for_account(None, Some(50)));
     }

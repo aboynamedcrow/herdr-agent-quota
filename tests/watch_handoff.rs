@@ -93,3 +93,41 @@ printf '%s\n' '{"result":{"agents":[]}}'
         "watcher kept polling the old incompatible Herdr client instead of adopting startup's environment");
     assert!(fs::read_to_string(log).unwrap().lines().count() > before);
 }
+
+#[test]
+fn every_supported_working_harness_keeps_the_watcher_alive() {
+    for harness in [
+        "codex", "grok", "claude", "agy", "devin", "pi", "omp", "opencode",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let herdr = dir.path().join("herdr");
+        fs::write(&herdr, format!("#!/bin/sh\ntouch \"$TEST_INVENTORY\"\nprintf '%s\\n' '{{\"result\":{{\"agents\":[{{\"pane_id\":\"w1:p1\",\"agent\":\"{harness}\",\"agent_status\":\"working\"}}]}}}}'\n")).unwrap();
+        fs::set_permissions(&herdr, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_herdr-agent-quota"))
+            .args(["watch", "--provider", "all"])
+            .env("HERDR_PLUGIN_STATE_DIR", dir.path())
+            .env("HERDR_BIN_PATH", herdr)
+            .env("TEST_INVENTORY", dir.path().join("inventory"))
+            .env("CODEX_BIN_PATH", dir.path().join("absent"))
+            .env("GROK_AUTH_FILE", dir.path().join("absent"))
+            .env("DEVIN_CREDENTIALS_FILE", dir.path().join("absent"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !dir.path().join("inventory").exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(200));
+        let premature = child.try_wait().unwrap();
+        if premature.is_none() {
+            child.kill().unwrap();
+            child.wait().unwrap();
+        }
+        assert!(
+            premature.is_none(),
+            "watcher exited while {harness} was working"
+        );
+    }
+}

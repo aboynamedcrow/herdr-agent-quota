@@ -1,5 +1,7 @@
 # Issue #22：活动模型显示名可观测性调研
 
+> Historical research, valid as of the date below. For current behavior and upgrade instructions, see the [README](../../README.md).
+
 研究日期：2026-08-26（Asia/Shanghai）  
 范围：GitHub issue #22、Claude Code statusLine、Google Antigravity/Agy statusLine、Codex app-server v2 `thread/list`，以及 Grok Build 的官方 status-line 合同。  
 来源约束：优先使用供应商官方文档和官方源码；Codex 源码固定到 2026-08-26 访问时的 `main` commit `2764e83626efe55f64e04d153fc99a157327f3c2`，Grok Build 固定到 `77cd7eb675ba911c225c3aaeeece3a20cbccc426`。移动中的文档页只代表访问日合同，不代表本地 CLI 永远不会变。
