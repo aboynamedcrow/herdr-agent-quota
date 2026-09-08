@@ -120,7 +120,10 @@ already-running CLI after an in-place login change. Quota comes from the
 home's current app-server account. Session rollouts supply bounded local
 model/context diagnostics, never replacement account quota. A failed fetch
 keeps the last good snapshot only for unchanged credentials; a successful
-API reading replaces all windows, including omitted ones.
+API reading replaces all windows, including omitted ones. The sidebar uses the
+account-wide `codex` limit pool only; model-specific pools never fill a missing
+5h or 7d window. Legacy responses with an absent, null, or empty pool map use
+their default pool; malformed maps do not authorize a fallback.
 
 The source verification recipe is [verify-herdr-agent-quota](docs/verify-herdr-agent-quota/SKILL.md).
 

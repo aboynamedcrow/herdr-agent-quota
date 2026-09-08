@@ -55,6 +55,30 @@ pub fn parse_rate_limits(
 }
 
 fn collect_codex_windows(value: &Value) -> Vec<UsageWindow> {
+    // A duration does not identify a quota pool. Never fill a missing account
+    // window from a model-specific limit (for example codex_bengalfox).
+    let by_id = value
+        .get("rateLimitsByLimitId")
+        .or_else(|| value.get("rate_limits_by_limit_id"));
+    let default = value
+        .get("rateLimits")
+        .or_else(|| value.get("rate_limits"))
+        .unwrap_or(value);
+    let limits = match by_id {
+        Some(Value::Object(map)) if !map.is_empty() => map.get("codex"),
+        None | Some(Value::Null) | Some(Value::Object(_)) => Some(default),
+        _ => None,
+    };
+    let Some(limits) = limits else {
+        return Vec::new();
+    };
+    if limits
+        .get("limitId")
+        .or_else(|| limits.get("limit_id"))
+        .is_some_and(|id| !id.is_null() && id.as_str() != Some("codex"))
+    {
+        return Vec::new();
+    }
     let mut windows = Vec::new();
     let mut push_from = |limits: &Value| {
         for candidate in [limits.get("primary"), limits.get("secondary")]
@@ -73,21 +97,7 @@ fn collect_codex_windows(value: &Value) -> Vec<UsageWindow> {
             windows.push(window);
         }
     };
-    if let Some(limits) = value.get("rateLimits").or_else(|| value.get("rate_limits")) {
-        push_from(limits);
-    }
-    if let Some(by_id) = value
-        .get("rateLimitsByLimitId")
-        .or_else(|| value.get("rate_limits_by_limit_id"))
-        .and_then(Value::as_object)
-    {
-        for limits in by_id.values() {
-            push_from(limits);
-        }
-    }
-    if value.get("primary").is_some() || value.get("secondary").is_some() {
-        push_from(value);
-    }
+    push_from(limits);
     windows
 }
 
@@ -833,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_a_five_hour_window_from_another_limit_id_bucket() {
+    fn never_borrows_a_five_hour_window_from_another_limit_id_bucket() {
         let value = json!({
             "result": {
                 "rateLimits": {
@@ -853,14 +863,81 @@ mod tests {
             }
         });
         let snapshot = parse_rate_limits(&value, 1).unwrap();
-        assert_eq!(
-            snapshot.window(WindowKind::FiveHour).unwrap().used_percent,
-            40.0
-        );
+        assert!(snapshot.window(WindowKind::FiveHour).is_none());
         assert_eq!(
             snapshot.window(WindowKind::Weekly).unwrap().used_percent,
             11.0
         );
+    }
+
+    #[test]
+    fn canonical_codex_pool_overrides_a_different_legacy_pool() {
+        let value = json!({
+            "rateLimits": {"limitId": "codex_other", "primary": {
+                "usedPercent": 90.0, "windowDurationMins": 300
+            }},
+            "rateLimitsByLimitId": {"codex": {"primary": {
+                "usedPercent": 62.0, "windowDurationMins": 10080
+            }}}
+        });
+        let snapshot = parse_rate_limits(&value, 1).unwrap();
+        assert!(snapshot.window(WindowKind::FiveHour).is_none());
+        assert_eq!(
+            snapshot.window(WindowKind::Weekly).unwrap().used_percent,
+            62.0
+        );
+    }
+
+    #[test]
+    fn absent_or_empty_codex_pool_never_selects_a_model_pool() {
+        let other = json!({"primary": {"usedPercent": 0.0, "windowDurationMins": 300}});
+        for value in [
+            json!({"rateLimitsByLimitId": {"codex_other": other.clone()}}),
+            json!({"rateLimitsByLimitId": {"codex": {}, "codex_other": other.clone()}}),
+            json!({"rateLimits": {"limitId": "codex_other", "primary": other["primary"]}}),
+        ] {
+            assert!(parse_rate_limits(&value, 1).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn snake_case_codex_pool_remains_separate() {
+        let value = json!({"rate_limits_by_limit_id": {
+            "codex": {"primary": {"used_percent": 62.0, "window_duration_mins": 10080}},
+            "codex_other": {"primary": {"used_percent": 0.0, "window_duration_mins": 300}}
+        }});
+        let snapshot = parse_rate_limits(&value, 1).unwrap();
+        assert!(snapshot.window(WindowKind::FiveHour).is_none());
+        assert_eq!(
+            snapshot.window(WindowKind::Weekly).unwrap().used_percent,
+            62.0
+        );
+    }
+
+    #[test]
+    fn empty_or_null_pool_map_preserves_legacy_default() {
+        for map in [Value::Null, json!({})] {
+            let value = json!({
+                "rateLimitsByLimitId": map,
+                "rateLimits": {"primary": {"usedPercent": 62.0, "windowDurationMins": 10080}}
+            });
+            let snapshot = parse_rate_limits(&value, 1).unwrap();
+            assert_eq!(
+                snapshot.window(WindowKind::Weekly).unwrap().used_percent,
+                62.0
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_pool_map_cannot_fall_back_to_default() {
+        for map in [json!("invalid"), json!([]), json!(true)] {
+            let value = json!({
+                "rateLimitsByLimitId": map,
+                "rateLimits": {"primary": {"usedPercent": 62.0, "windowDurationMins": 10080}}
+            });
+            assert!(parse_rate_limits(&value, 1).is_err(), "{value}");
+        }
     }
 
     #[test]

@@ -15,6 +15,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Keep Codex quota windows within the account-wide `codex` pool instead of
+  filling absent windows from unrelated model-specific limit pools.
 - Remove inherited `BASH_ENV` and `ENV` from upgrade-test installer commands so
   shell startup hooks cannot override fixture executables.
 
