@@ -1,5 +1,6 @@
 pub mod cache;
 pub mod cli;
+pub mod codex_accounts;
 pub mod model;
 pub mod prefs;
 pub mod presentation;

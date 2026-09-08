@@ -73,11 +73,62 @@ herdr plugin pane open --plugin herdr-agent-quota --entrypoint settings --focus
 Use arrows or Space to edit, `a` to apply, and `q` to close.
 Installer options are also available through `./install.sh --help`.
 
+### Native Codex account homes
+
+Native Codex panes are matched by Herdr's exact session UUID to a rollout
+header in an allowed Codex home. Without configuration, the plugin uses its
+process's `CODEX_HOME`, or `~/.codex` when unset. A missing session or account
+identity displays `N/A`; it never borrows another home's quota.
+
+For multiple accounts, put a JSON array of absolute account-home paths in the
+`codex-homes` file under the plugin's `HERDR_PLUGIN_CONFIG_DIR`. Obtain the
+paths from your account manager's resolver. This opt-in list replaces the
+default home; include every home whose native panes should receive quota.
+The file is an advanced preference, separate from the settings popup. Herdr
+plugin actions run in the server's environment, so exporting `CODEX_HOME`
+around `herdr plugin action invoke` does not configure them.
+
+The list permits at most 32 homes and 64 KiB of JSON. Relative paths, malformed
+configuration, unreadable homes, duplicate session matches across homes, and
+session links escaping a home fail closed. A symlinked `auth.json` also fails
+closed, even when its target is a regular file inside the same home: the
+resolver requires a regular credential file and does not follow credential
+links. Such panes display `N/A` with identity unavailable. Removing the
+allowlist file restores the single-home default; a full uninstall removes it too.
+
+Each home uses a separate collector, cache, refresh lease, and 60-second
+debounce. Panes sharing that home's unchanged credentials share one request.
+Storage paths stay fixed per canonical home across account changes and token
+rotation: one snapshot, one refresh marker, and one lease file. The snapshot
+and refresh marker carry an opaque credential-generation stamp, so a changed
+generation cannot reuse quota, omitted windows, or debounce from the old one.
+Any change to `auth.json` invalidates its cached attribution, even when the
+organization account ID is unchanged. This deliberately includes routine
+token rotation: a fresh successful collection is required before showing
+quota again. A file-authenticated ChatGPT account is required; keychain-only
+and API-key authentication are not attributed by this resolver.
+
+Low-quota warnings remember each native Codex home/account independently.
+Another account's healthy quota, an absent pane, or unavailable identity does
+not rearm a low account. Only an observed recovery above the threshold rearms
+it. Warning identity stays stable across token rotation; other collectors
+retain their existing provider-level warning behavior.
+
+Keep each home dedicated to its account while native panes are running. The
+session-to-home mapping does not identify credentials retained inside an
+already-running CLI after an in-place login change. Quota comes from the
+home's current app-server account. Session rollouts supply bounded local
+model/context diagnostics, never replacement account quota. A failed fetch
+keeps the last good snapshot only for unchanged credentials; a successful
+API reading replaces all windows, including omitted ones.
+
+The source verification recipe is [verify-herdr-agent-quota](docs/verify-herdr-agent-quota/SKILL.md).
+
 ## Data sources and limits
 
 | Agent | Quota source | Attribution |
 | --- | --- | --- |
-| Codex | Codex app-server; 5h and/or 7d | Current login in the plugin's `CODEX_HOME` |
+| Codex | Codex app-server; 5h and/or 7d | Exact native session in one allowed account home |
 | Grok | CLI billing endpoint; 7d or 30d | Current CLI credentials |
 | Devin | CLI usage endpoint; 1d and 7d | Current CLI credentials |
 | Claude Code | StatusLine; 5h and 7d | Exact session observation |
@@ -96,12 +147,15 @@ are debounced for 60 seconds, including a final refresh after a turn settles.
 OMP additionally retains its own five-minute usage cache. Idle panes sharing a
 verified quota source receive the same reading.
 
-Native Codex, Grok, and Devin collectors follow the plugin's current login,
-not separate accounts for each pane. Claude/Agy do not report a reliable serving
-account ID, so their observations are not shared across sessions. Unknown
+Native Codex attributes each pane's exact session to one allowed account home
+and uses that home's current account. Grok and Devin collectors follow the
+plugin's current CLI credentials, without separate account attribution per pane.
+Claude/Agy do not report a reliable serving account ID, so their observations
+are not shared across sessions. Unknown
 identity or model-pool attribution does not produce a guessed quota. Failed
 requests preserve the last verified reading for that same account; they do not
-turn failures into zero usage.
+turn failures into zero usage. Native Codex also requires unchanged credentials
+to retain that reading.
 
 ## Troubleshooting
 

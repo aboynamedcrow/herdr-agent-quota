@@ -412,8 +412,8 @@ fn handle_named_pane(cache: &CacheStore, pane: AgentPane, topic_pane: Option<&st
     .into_iter()
     .collect::<Vec<_>>();
     // Event and focus see one pane, not the whole inventory, which is exactly
-    // what the alert needs: the entry is keyed by provider, and a provider
-    // with no pane in the pass keeps whatever state it had. Warning here is
+    // what the alert needs: an account/provider with no available quota in
+    // the pass keeps whatever warning state it had. Warning here is
     // what makes the alert land at the end of the turn that spent the quota
     // rather than at the next poll.
     notify_low_quota(cache, &tokens);
@@ -433,8 +433,43 @@ fn resolved_pane_tokens(
         identity,
         context,
         omp,
+        codex,
     } = resolved;
+    let notification_key = codex.as_ref().map(|account| account.warning_identity());
     let mut quota = match resolution {
+        Resolution::Subscription(target)
+            if target.credential_scope == CredentialScope::CODEX_ACCOUNT =>
+        {
+            let snapshot = cache.load_target(&target)?;
+            let usable = codex
+                .as_ref()
+                .filter(|account| account.is_current())
+                .and_then(|account| {
+                    snapshot
+                        .as_ref()
+                        .filter(|snapshot| account.matches_snapshot(snapshot))
+                });
+            let values = usable
+                .map(|snapshot| {
+                    MetadataTokens::from_snapshot_for_pane(
+                        snapshot,
+                        now,
+                        pane.session.as_ref().and_then(|session| session.id()),
+                        style,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    MetadataTokens::unavailable(
+                        Provider::Codex,
+                        if codex.as_ref().is_some_and(|account| !account.is_current()) {
+                            "Codex account identity unavailable"
+                        } else {
+                            "Codex account quota unavailable"
+                        },
+                    )
+                });
+            Some(PaneQuotaUpdate::Replace(Box::new(values)))
+        }
         Resolution::Subscription(target)
             if target.credential_scope == CredentialScope::OMP_STORE =>
         {
@@ -486,6 +521,12 @@ fn resolved_pane_tokens(
             Some(PaneQuotaUpdate::Clear)
         }
         Resolution::NoSubscription => None,
+        Resolution::Indeterminate if pane.harness == Harness::Codex => Some(
+            PaneQuotaUpdate::Replace(Box::new(MetadataTokens::unavailable(
+                Provider::Codex,
+                "Codex account identity unavailable or ambiguous",
+            ))),
+        ),
         Resolution::Indeterminate if plugin_quota_present(&pane.tokens) || identity.is_some() => {
             Some(PaneQuotaUpdate::Clear)
         }
@@ -499,6 +540,7 @@ fn resolved_pane_tokens(
         quota,
         identity,
         context,
+        notification_key,
     }))
 }
 
@@ -739,6 +781,33 @@ fn refresh_provider(
     force: bool,
     panes: &[AgentPane],
 ) -> Result<ProviderOutcome> {
+    if provider == Provider::Codex && panes.iter().any(|pane| pane.harness == Harness::Codex) {
+        let mut outcome = refresh_codex_accounts(cache, force, panes)?;
+        // Pi's independently verified canonical account still needs its own
+        // collector when native account-scoped Codex panes share the inventory.
+        if panes.iter().any(|pane| {
+            pane.harness == Harness::Pi
+                && route::resolve_with_identity(pane).resolution
+                    == Resolution::Subscription(BillingTarget::original_four(Provider::Codex))
+        }) {
+            let canonical = refresh_canonical_provider(cache, provider, force, &[])?;
+            outcome.available |= canonical.available;
+            outcome.from_cache &= canonical.from_cache;
+            if canonical.error.is_some() {
+                outcome.error = canonical.error;
+            }
+        }
+        return Ok(outcome);
+    }
+    refresh_canonical_provider(cache, provider, force, panes)
+}
+
+fn refresh_canonical_provider(
+    cache: &CacheStore,
+    provider: Provider,
+    force: bool,
+    panes: &[AgentPane],
+) -> Result<ProviderOutcome> {
     let now = CacheStore::now_unix();
     if should_skip_fetch(cache, provider, force, now)? {
         return Ok(ProviderOutcome {
@@ -813,6 +882,107 @@ fn refresh_provider(
             error: Some(error.to_string()),
         }),
     }
+}
+
+/// One request per resolved account in this pass. A missing/ambiguous native
+/// pane never falls through to the ambient canonical Codex collector.
+fn refresh_codex_accounts(
+    cache: &CacheStore,
+    force: bool,
+    panes: &[AgentPane],
+) -> Result<ProviderOutcome> {
+    let mut groups = BTreeMap::<String, (crate::codex_accounts::CodexAccount, Vec<String>)>::new();
+    for pane in panes.iter().filter(|pane| pane.harness == Harness::Codex) {
+        let Some(session_id) = pane.session.as_ref().and_then(|session| session.id()) else {
+            continue;
+        };
+        let Some(account) = crate::codex_accounts::resolve(Some(session_id)) else {
+            continue;
+        };
+        let (_, sessions) = groups
+            .entry(account.target().cache_identity())
+            .or_insert((account, Vec::new()));
+        if !sessions.iter().any(|id| id == session_id) {
+            sessions.push(session_id.to_string());
+        }
+    }
+    let mut outcome = ProviderOutcome {
+        provider: Provider::Codex,
+        available: false,
+        from_cache: true,
+        error: None,
+    };
+    if groups.is_empty() {
+        outcome.error = Some("Codex account identity unavailable or ambiguous".to_string());
+    }
+    for (account, sessions) in groups.values() {
+        let refreshed = refresh_codex_account(cache, account, sessions, force)?;
+        outcome.available |= refreshed.available;
+        outcome.from_cache &= refreshed.from_cache;
+        if refreshed.error.is_some() {
+            outcome.error = refreshed.error;
+        }
+    }
+    Ok(outcome)
+}
+
+fn refresh_codex_account(
+    cache: &CacheStore,
+    account: &crate::codex_accounts::CodexAccount,
+    sessions: &[String],
+    force: bool,
+) -> Result<ProviderOutcome> {
+    let target = account.target();
+    let now = CacheStore::now_unix();
+    let previous = cache.load_target(&target)?;
+    let generation = account.generation();
+    let usable = account.is_current()
+        && previous
+            .as_ref()
+            .is_some_and(|snapshot| account.matches_snapshot(snapshot));
+    let mut outcome = ProviderOutcome {
+        provider: Provider::Codex,
+        available: usable,
+        from_cache: true,
+        error: None,
+    };
+    if !force && cache.should_debounce_codex_generation(&target, &generation, now) {
+        return Ok(outcome);
+    }
+    let Some(_lease) = cache.try_lock_target_refresh(&target)? else {
+        outcome.error = Some("refresh already in progress".to_string());
+        return Ok(outcome);
+    };
+    // Recheck after taking the lease: another invocation may have completed
+    // between the first debounce check and this acquisition.
+    if !account.is_current() {
+        outcome.available = false;
+        outcome.error = Some("Codex account identity unavailable".to_string());
+        return Ok(outcome);
+    }
+    if !force && cache.should_debounce_codex_generation(&target, &generation, now) {
+        return Ok(outcome);
+    }
+    cache.mark_refresh_codex_generation(&target, &generation, now)?;
+    match codex::fetch_for_account(account, sessions) {
+        Ok(mut snapshot) => {
+            cache.save_target_preserving_diagnostics(
+                &target,
+                &mut snapshot,
+                sessions,
+                CacheStore::file_mtime_unix(&account.home.join("auth.json")),
+            )?;
+            outcome.available = true;
+            outcome.from_cache = false;
+        }
+        Err(_) => {
+            // Provider errors can contain RPC data. Publish only this bounded
+            // diagnostic; never forward credential-bearing provider payloads.
+            outcome.available &= account.is_current();
+            outcome.error = Some("Codex account quota collection failed".to_string());
+        }
+    }
+    Ok(outcome)
 }
 
 fn should_skip_fetch(
@@ -974,12 +1144,11 @@ fn publish_resolved(
     publish_pane_tokens(panes, &tokens, CacheStore::now_millis())
 }
 
-/// The lowest headroom each provider is showing in this pass.
+/// The lowest headroom each warning identity is showing in this pass.
 ///
-/// Keyed by the provider's display name because that is both what a pane
-/// reports and what a notification has to say. Several panes on one provider
-/// collapse to one entry, so three Claude panes are one warning.
-fn lowest_headroom_by_provider(tokens: &[PaneTokens]) -> BTreeMap<String, u8> {
+/// Native Codex keys retain home/account identity across token rotations.
+/// Other collectors retain their existing provider-level continuity.
+fn lowest_headroom_by_warning_identity(tokens: &[PaneTokens]) -> BTreeMap<String, u8> {
     let mut lowest = BTreeMap::new();
     for pane in tokens {
         let PaneQuotaUpdate::Replace(values) = &pane.quota else {
@@ -989,29 +1158,52 @@ fn lowest_headroom_by_provider(tokens: &[PaneTokens]) -> BTreeMap<String, u8> {
             continue;
         };
         lowest
-            .entry(values.quota_provider.clone())
+            .entry(
+                pane.notification_key
+                    .clone()
+                    .unwrap_or_else(|| values.quota_provider.clone()),
+            )
             .and_modify(|current: &mut u8| *current = (*current).min(headroom))
             .or_insert(headroom);
     }
     lowest
 }
 
-/// Warn once per provider that has fallen to the alert threshold.
+/// Warn once per account/provider identity that has fallen to the threshold.
 ///
-/// A provider stays quiet for as long as it stays low, and is re-armed only by
+/// An identity stays quiet for as long as it stays low, and is re-armed only by
 /// recovering above the threshold — a quota that resets and is spent again
-/// warns again. Providers with no pane in this pass keep whatever state they
+/// warns again. Identities with no available quota keep whatever state they
 /// had, so closing and reopening a pane is not a way to be warned twice.
 fn notify_low_quota(cache: &CacheStore, tokens: &[PaneTokens]) {
     let alert = cache.low_quota_alert().unwrap_or_default();
     if alert.is_off() {
         return;
     }
-    let lowest = lowest_headroom_by_provider(tokens);
+    // Distinct account events can publish concurrently. Serialize the shared
+    // transition set so one event cannot discard another account's warning.
+    let Ok(Some(_lease)) = cache.try_lock_named("low-quota-alert.lock") else {
+        return;
+    };
+    let lowest = lowest_headroom_by_warning_identity(tokens);
     let previous = cache.low_quota_alerted();
     let (warn, alerted) = low_quota_transitions(alert, &lowest, &previous);
-    for provider in &warn {
-        let headroom = lowest.get(provider).copied().unwrap_or_default();
+    for key in &warn {
+        let headroom = lowest.get(key).copied().unwrap_or_default();
+        let provider = tokens
+            .iter()
+            .find_map(|pane| {
+                let PaneQuotaUpdate::Replace(values) = &pane.quota else {
+                    return None;
+                };
+                (pane
+                    .notification_key
+                    .as_deref()
+                    .unwrap_or(&values.quota_provider)
+                    == key)
+                    .then_some(values.quota_provider.as_str())
+            })
+            .unwrap_or("Provider");
         let _ = crate::herdr::notify(
             &format!("{provider} quota is low"),
             &format!("{headroom}% left in the window closest to its limit."),
@@ -1024,17 +1216,17 @@ fn notify_low_quota(cache: &CacheStore, tokens: &[PaneTokens]) {
     }
 }
 
-/// Which providers to warn about now, and the state to remember afterwards.
+/// Which warning identities to notify now, and the state to remember afterwards.
 ///
 /// Split out from the notification itself so the rule can be tested without a
-/// cache or a Herdr: a provider is warned about on the way down and not again
+/// cache or a Herdr: an identity is warned about on the way down and not again
 /// until it has been seen above the threshold.
 fn low_quota_transitions(
     alert: LowQuotaAlert,
     lowest: &BTreeMap<String, u8>,
     previous: &[String],
 ) -> (Vec<String>, Vec<String>) {
-    // A provider with no pane in this pass keeps the state it had. Otherwise
+    // An identity with no available quota in this pass keeps its state. Otherwise
     // closing a pane would re-arm the warning and reopening it would repeat.
     let mut alerted: Vec<String> = previous
         .iter()
@@ -1430,9 +1622,10 @@ mod tests {
                 quota: PaneQuotaUpdate::Replace(Box::new(values)),
                 identity: None,
                 context: None,
+                notification_key: None,
             }
         };
-        let lowest = lowest_headroom_by_provider(&[
+        let lowest = lowest_headroom_by_warning_identity(&[
             tokens("Claude", Some(40)),
             tokens("Claude", Some(12)),
             tokens("Codex", None),

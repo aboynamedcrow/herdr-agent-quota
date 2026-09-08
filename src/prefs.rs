@@ -14,6 +14,8 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
+/// Optional JSON array of absolute native Codex account homes.
+pub const CODEX_HOMES: &str = "codex-homes";
 /// Comma-separated agent selection, matching `configure --agent`.
 pub const AGENTS: &str = "agents";
 /// Active-turn poll interval, in seconds.
@@ -27,8 +29,9 @@ pub const AGENT_ORDER: &str = "agent-order";
 pub const LOW_QUOTA_ALERT: &str = "low-quota-alert";
 
 /// Every preference a full uninstall must forget.
-pub const ALL: [&str; 9] = [
+pub const ALL: [&str; 10] = [
     AGENTS,
+    CODEX_HOMES,
     WATCH_INTERVAL_SECONDS,
     SIDEBAR_LAYOUT,
     ROW_GAP,
