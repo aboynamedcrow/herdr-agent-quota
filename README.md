@@ -7,6 +7,14 @@ Model, context, prompt-cache usage, and subscription quota in Herdr's Agent side
 
 [简体中文](README.zh-CN.md)
 
+<table>
+<tr><th>packed (default)</th><th>stacked</th></tr>
+<tr>
+<td valign="top"><img src="docs/screenshots/sidebar-packed.png" alt="Packed sidebar" width="284"></td>
+<td valign="top"><img src="docs/screenshots/sidebar-stacked.png" alt="Stacked sidebar" width="177"></td>
+</tr>
+</table>
+
 The plugin preserves Herdr's native rows, custom styles, and worktree grouping.
 Optional quota ordering and low-quota notifications are disabled by default.
 Empty fields collapse; percentages can show remaining or used quota.

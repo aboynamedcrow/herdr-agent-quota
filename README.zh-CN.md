@@ -7,6 +7,14 @@
 
 [English](README.md)
 
+<table>
+<tr><th>packed（默认）</th><th>stacked</th></tr>
+<tr>
+<td valign="top"><img src="docs/screenshots/sidebar-packed.png" alt="拼接布局" width="284"></td>
+<td valign="top"><img src="docs/screenshots/sidebar-stacked.png" alt="分行布局" width="177"></td>
+</tr>
+</table>
+
 插件保留 Herdr 原生行、自定义样式和 worktree 分组。按额度排序和低额度通知默认关闭。
 空字段自动折叠，百分比可选择显示剩余或已用额度。
 
