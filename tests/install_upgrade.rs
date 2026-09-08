@@ -50,6 +50,10 @@ esac
     }
     let output = Command::new("bash")
         .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/install.sh"))
+        // A caller's non-interactive startup hook can reorder PATH ahead of
+        // these stubs and turn a simulated upgrade into a live installation.
+        .env_remove("BASH_ENV")
+        .env_remove("ENV")
         .env(
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),

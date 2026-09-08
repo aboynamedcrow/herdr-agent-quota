@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Attribute native Codex panes to exact sessions in explicitly allowed account
+  homes via `codex-homes`, with separate quota caches and account-aware warnings.
+  Missing or ambiguous identity shows `N/A`; credential changes invalidate old
+  readings, and API responses remain authoritative for quota windows.
+
+### Fixed
+
+- Remove inherited `BASH_ENV` and `ENV` from upgrade-test installer commands so
+  shell startup hooks cannot override fixture executables.
+
 ## [1.5.2] - 2026-09-08
 
 ### Changed

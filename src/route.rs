@@ -24,11 +24,27 @@ pub struct ResolvedPane {
     /// subscription is paying; this says which of omp's accounts, and where to
     /// ask omp about it.
     pub omp: Option<crate::omp::OmpEvidence>,
+    pub codex: Option<crate::codex_accounts::CodexAccount>,
 }
 
 pub fn resolve_with_identity(pane: &AgentPane) -> ResolvedPane {
     let resolution = match pane.harness {
-        Harness::Codex | Harness::Grok | Harness::Claude | Harness::Agy | Harness::Devin => pane
+        Harness::Codex => {
+            let account = crate::codex_accounts::resolve(
+                pane.session.as_ref().and_then(|session| session.id()),
+            );
+            return ResolvedPane {
+                resolution: account
+                    .as_ref()
+                    .map(|account| Resolution::Subscription(account.target()))
+                    .unwrap_or(Resolution::Indeterminate),
+                identity: None,
+                context: None,
+                omp: None,
+                codex: account,
+            };
+        }
+        Harness::Grok | Harness::Claude | Harness::Agy | Harness::Devin => pane
             .harness
             .billing()
             .map(BillingTarget::original_four)
@@ -58,6 +74,7 @@ pub fn resolve_with_identity(pane: &AgentPane) -> ResolvedPane {
         identity: None,
         context: None,
         omp: None,
+        codex: None,
     }
 }
 
@@ -69,6 +86,7 @@ fn resolve_omp_with_identity(session_path: Option<&str>) -> ResolvedPane {
         identity: route.session.as_ref().and_then(pi_identity),
         context: route.context,
         omp: route.evidence,
+        codex: None,
     }
 }
 
@@ -87,6 +105,7 @@ fn resolve_pi_with_identity(
         identity: route.session.as_ref().and_then(pi_identity),
         context: route.context,
         omp: None,
+        codex: None,
     }
 }
 
@@ -145,6 +164,7 @@ fn resolve_opencode_with_identity(
         identity,
         context,
         omp: None,
+        codex: None,
     }
 }
 
@@ -154,6 +174,7 @@ fn indeterminate_pane() -> ResolvedPane {
         identity: None,
         context: None,
         omp: None,
+        codex: None,
     }
 }
 
@@ -372,7 +393,6 @@ mod tests {
     fn original_four_panes_resolve_to_canonical_targets() {
         for (harness, provider) in [
             (Harness::Claude, Provider::Claude),
-            (Harness::Codex, Provider::Codex),
             (Harness::Grok, Provider::Grok),
             (Harness::Agy, Provider::Agy),
         ] {
