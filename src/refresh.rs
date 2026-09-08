@@ -488,8 +488,8 @@ fn resolved_pane_tokens(
 ///
 /// One `omp usage --json` per debounce window, for the one provider the pane
 /// is actually talking to — never a fan-out over omp's whole credential pool.
-/// Without an account to attribute the numbers to, the pane keeps what it
-/// already published rather than showing a peer account's quota.
+/// Without an account to attribute the numbers to, the pane shows unavailable
+/// quota rather than retaining numbers from an unconfirmed account.
 fn omp_quota(
     cache: &CacheStore,
     target: &BillingTarget,
