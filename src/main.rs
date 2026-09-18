@@ -49,7 +49,9 @@ fn main() -> Result<()> {
                 low_quota_alert,
             },
         ),
-        Command::ClaudeStatusline => herdr_agent_quota::configure::claude::run_statusline_hook(),
+        Command::ClaudeStatusline { collect_only } => {
+            herdr_agent_quota::configure::claude::run_statusline_hook_mode(collect_only)
+        }
         Command::AgyStatusline => herdr_agent_quota::configure::agy::run_statusline_hook(),
     }
 }

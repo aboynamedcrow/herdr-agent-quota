@@ -40,6 +40,15 @@ Set `external-layout` to `true` when a consumer owns sidebar rows and sorting.
 Configure, startup, and uninstall then leave that layout owner alone.
 The plugin still publishes quota tokens.
 
+Use `claude-statusline --collect-only` when an account-aware installer owns the status-line chain.
+This command stores session diagnostics and writes no output. It does not run the plugin's saved previous command.
+The caller must preserve and run each account's previous command itself.
+
+Claude and Codex show neutral `5h N/A` when the provider omits that limit.
+An available weekly limit stays on the quota row.
+Both percentage styles use the same severity: green at 50% remaining, yellow at 20%, and red below 20%.
+Changing percentage style changes the number, not its severity.
+
 ## Install and upgrade
 
 Requires **Herdr 0.9.0+**, the Rust toolchain pinned in `rust-toolchain.toml`,
