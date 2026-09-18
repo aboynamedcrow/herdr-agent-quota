@@ -1068,3 +1068,159 @@ fn scoped_omission_does_not_restore_an_expired_window_or_unstamped_rollout_quota
         }
     }
 }
+
+fn shared_fixture(root: &Path, fetched: u64, remaining: u8) {
+    fs::write(
+        root.join("config/shared-usage-command"),
+        "cat > \"$TEST_ROOT/requests.json\"; cat \"$TEST_ROOT/shared.json\"",
+    )
+    .unwrap();
+    let snapshot = |left: u8| {
+        json!({"provider":"codex","source":"fixture-cache","fetched_at_unix":fetched,
+        "windows":[{"kind":"five_hour","used_percent":100-left,"remaining_percent":left,"resets_at":4000000000u64}]})
+    };
+    fs::write(
+        root.join("shared.json"),
+        json!({
+            "w1:p1":{"key":"codex/a","snapshot":snapshot(remaining)},
+            "w1:p2":{"key":"codex/b","snapshot":snapshot(27)},
+            "w1:p3":{"reason":"Account identity unavailable"}
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn shared_cache_binds_accounts_without_provider_fetch_and_clears_stale_values() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    setup(root);
+    let now = CacheStore::now_unix();
+    shared_fixture(root, now, 88);
+    refresh(root);
+    assert!(
+        !root.join("codex.log").exists(),
+        "shared cache must not invoke Codex"
+    );
+    let requests: Value =
+        serde_json::from_str(&fs::read_to_string(root.join("requests.json")).unwrap()).unwrap();
+    assert_eq!(
+        requests[0]["home"],
+        root.join("a").canonicalize().unwrap().to_str().unwrap()
+    );
+    assert_eq!(
+        requests[1]["home"],
+        root.join("b").canonicalize().unwrap().to_str().unwrap()
+    );
+    let reports = writes(root);
+    for (pane, value) in [("w1:p1", "88%"), ("w1:p2", "27%"), ("w1:p3", "N/A")] {
+        assert!(reports
+            .iter()
+            .find(|r| r[2] == pane)
+            .unwrap()
+            .join(" ")
+            .contains(value));
+    }
+    shared_fixture(root, now - 301, 88);
+    refresh(root);
+    for report in writes(root).iter().skip(reports.len()) {
+        assert!(report.join(" ").contains("N/A"));
+        assert!(!report.join(" ").contains("88%"));
+    }
+    assert!(!root.join("codex.log").exists());
+}
+
+#[test]
+fn shared_watcher_updates_idle_panes_and_exits_when_herdr_stops() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    setup(root);
+    shared_fixture(root, CacheStore::now_unix(), 88);
+    // No working panes or focus events exist in this inventory.
+    let mut child = command(root)
+        .args(["watch", "--provider", "codex"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let wait_for = |text: &str| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+            loop {
+                if fs::read_to_string(root.join("herdr.log"))
+                    .unwrap_or_default()
+                    .contains(text)
+                {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "missing {text}");
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }
+        };
+        wait_for("88%");
+        shared_fixture(root, CacheStore::now_unix(), 55);
+        wait_for("55%");
+        shared_fixture(root, CacheStore::now_unix() - 301, 55);
+        // Only p1 was healthy and then expired. Check a new write for that pane.
+        fs::write(root.join("herdr.log"), "").unwrap();
+        wait_for("Shared usage unavailable");
+        assert!(writes(root)
+            .iter()
+            .any(|r| r[2] == "w1:p1" && r.join(" ").contains("N/A")));
+        assert!(!root.join("codex.log").exists());
+        executable(&root.join("herdr"), "#!/bin/sh\nexit 1\n");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while child.try_wait().unwrap().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "watcher survived Herdr shutdown"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+    }));
+    let _ = child.kill();
+    let _ = child.wait();
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+}
+
+#[test]
+fn shared_cache_preserves_exact_session_diagnostics_and_rejects_login_change() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    setup(root);
+    shared_fixture(root, CacheStore::now_unix(), 88);
+    let rollout = root.join(format!("a/sessions/rollout-2099-01-01-{A}.jsonl"));
+    let header = fs::read_to_string(&rollout).unwrap();
+    let observation = json!({"type":"event_msg","timestamp":"2026-09-18T00:00:00Z","payload":{"type":"token_count","info":{
+        "last_token_usage":{"total_tokens":50000,"cached_input_tokens":800,"cache_write_input_tokens":100},
+        "total_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"cache_write_input_tokens":100},"model_context_window":100000}}});
+    fs::write(rollout, format!("{header}\n{observation}\n")).unwrap();
+    refresh(root);
+    let reports = writes(root);
+    let first = reports.iter().find(|r| r[2] == "w1:p1").unwrap().join(" ");
+    assert!(
+        first.contains("quota_cache=cache "),
+        "session cache missing: {first}"
+    );
+    assert!(
+        first.contains("quota_context=context "),
+        "context missing: {first}"
+    );
+    assert!(!reports
+        .iter()
+        .find(|r| r[2] == "w1:p3")
+        .unwrap()
+        .join(" ")
+        .contains("quota_cache=cache "));
+    fs::write(root.join("config/shared-usage-command"),
+        "cat > /dev/null; printf '%s' '{\"tokens\":{\"account_id\":\"changed\"}}' > \"$TEST_ROOT/a/auth.json\"; cat \"$TEST_ROOT/shared.json\"").unwrap();
+    refresh(root);
+    assert!(writes(root)
+        .iter()
+        .skip(reports.len())
+        .any(|r| r[2] == "w1:p1" && r.join(" ").contains("N/A")));
+    assert!(!root.join("codex.log").exists());
+}

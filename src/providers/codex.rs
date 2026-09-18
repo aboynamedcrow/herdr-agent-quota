@@ -341,7 +341,11 @@ fn enrich_local_sessions(snapshot: &mut ProviderSnapshot, session_ids: &[String]
     enrich_local_sessions_at(snapshot, &home, session_ids);
 }
 
-fn enrich_local_sessions_at(snapshot: &mut ProviderSnapshot, home: &Path, session_ids: &[String]) {
+pub(crate) fn enrich_local_sessions_at(
+    snapshot: &mut ProviderSnapshot,
+    home: &Path,
+    session_ids: &[String],
+) {
     if session_ids.is_empty() {
         return;
     }

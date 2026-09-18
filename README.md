@@ -16,10 +16,29 @@ Model, context, prompt-cache usage, and subscription quota in Herdr's Agent side
 </table>
 
 The plugin preserves Herdr's native machine/workspace/tab row, custom styles,
-and worktree grouping. The branded provider/model line is the agent identity;
-the native `agent` row is omitted so `grok` does not sit above `Grok/grok-4.6`.
+and worktree grouping. The branded provider/model line is the agent identity.
+The native `agent` row is omitted so `grok` does not sit above `Grok/grok-4.6`.
 Optional quota ordering and low-quota notifications are disabled by default.
-Empty fields collapse; percentages can show remaining or used quota.
+Empty fields collapse. Percentages can show remaining or used quota.
+
+## Shared account cache
+
+Set `shared-usage-command` in the plugin config directory to a trusted shell command.
+The plugin sends JSON requests with `pane_id`, `provider`, and an optional Codex `home`.
+The command returns an object keyed by pane ID.
+Each entry contains `snapshot`, `key`, and `reason`.
+A snapshot uses the `ProviderSnapshot` JSON format.
+The command owns account attribution. It must reject ambiguous or stale identity.
+
+In this mode, native Claude and Codex use the shared snapshots for quota.
+The plugin reads the cache every five seconds, including for idle panes.
+It rejects reports older than five minutes. It retains local session diagnostics.
+Other harnesses keep their existing collectors.
+A failed Herdr inventory read stops the shared watcher.
+
+Set `external-layout` to `true` when a consumer owns sidebar rows and sorting.
+Configure, startup, and uninstall then leave that layout owner alone.
+The plugin still publishes quota tokens.
 
 ## Install and upgrade
 
@@ -43,7 +62,7 @@ git pull --ff-only
 ./install.sh
 ```
 
-Upgrades retain saved preferences, repair managed configuration, refresh quota,
+Upgrades retain saved preferences, fix managed configuration, refresh quota,
 and restore background updates automatically. No cache deletion or watcher
 management is required. Changes to the Herdr server connection are adopted by
 the watcher automatically.
@@ -60,10 +79,10 @@ herdr plugin pane open --plugin herdr-agent-quota --entrypoint settings --focus
 
 | Setting | Options |
 | --- | --- |
-| Percentages | Remaining or used; colors always indicate remaining headroom |
-| Layout | `packed` groups related fields; `stacked` gives each field a row |
+| Percentages | Remaining or used. Colors always indicate remaining headroom |
+| Layout | `packed` groups related fields. `stacked` gives each field a row |
 | Row gap | Zero or one blank line between agents |
-| Watch interval | 30 seconds–1 hour; default 60 seconds |
+| Watch interval | 30 seconds–1 hour. Default 60 seconds |
 | Fields | Topic, model, cache, TTL, context, short/long quota |
 | Brand colors | On or off |
 | Agent order | Herdr default or lowest remaining quota first |
@@ -78,12 +97,12 @@ Installer options are also available through `./install.sh --help`.
 Native Codex panes are matched by Herdr's exact session UUID to a rollout
 header in an allowed Codex home. Without configuration, the plugin uses its
 process's `CODEX_HOME`, or `~/.codex` when unset. A missing session or account
-identity displays `N/A`; it never borrows another home's quota.
+identity shows `N/A`. It never borrows another home's quota.
 
 For multiple accounts, put a JSON array of absolute account-home paths in the
-`codex-homes` file under the plugin's `HERDR_PLUGIN_CONFIG_DIR`. Obtain the
+`codex-homes` file under the plugin's `HERDR_PLUGIN_CONFIG_DIR`. Read the
 paths from your account manager's resolver. This opt-in list replaces the
-default home; include every home whose native panes should receive quota.
+default home. Include every home whose native panes should receive quota.
 The file is an advanced preference, separate from the settings popup. Herdr
 plugin actions run in the server's environment, so exporting `CODEX_HOME`
 around `herdr plugin action invoke` does not configure them.
@@ -93,8 +112,8 @@ configuration, unreadable homes, duplicate session matches across homes, and
 session links escaping a home fail closed. A symlinked `auth.json` also fails
 closed, even when its target is a regular file inside the same home: the
 resolver requires a regular credential file and does not follow credential
-links. Such panes display `N/A` with identity unavailable. Removing the
-allowlist file restores the single-home default; a full uninstall removes it too.
+links. Such panes show `N/A` with identity unavailable. Removing the
+allowlist file restores the single-home default. A full uninstall removes it too.
 
 Each home uses a separate collector, cache, refresh lease, and 60-second
 debounce. Panes sharing that home's unchanged credentials share one request.
@@ -105,25 +124,25 @@ generation cannot reuse quota, omitted windows, or debounce from the old one.
 Any change to `auth.json` invalidates its cached attribution, even when the
 organization account ID is unchanged. This deliberately includes routine
 token rotation: a fresh successful collection is required before showing
-quota again. A file-authenticated ChatGPT account is required; keychain-only
+quota again. A file-authenticated ChatGPT account is required. Keychain-only
 and API-key authentication are not attributed by this resolver.
 
 Low-quota warnings remember each native Codex home/account independently.
 Another account's healthy quota, an absent pane, or unavailable identity does
 not rearm a low account. Only an observed recovery above the threshold rearms
-it. Warning identity stays stable across token rotation; other collectors
+it. Warning identity stays stable across token rotation. Other collectors
 retain their existing provider-level warning behavior.
 
 Keep each home dedicated to its account while native panes are running. The
 session-to-home mapping does not identify credentials retained inside an
 already-running CLI after an in-place login change. Quota comes from the
 home's current app-server account. Session rollouts supply bounded local
-model/context diagnostics, never replacement account quota. A failed fetch
-keeps the last good snapshot only for unchanged credentials; a successful
+model/context diagnostics, never replacement account quota. A failed read
+keeps the last good snapshot only for unchanged credentials. A successful
 API reading replaces all windows, including omitted ones. The sidebar uses the
-account-wide `codex` limit pool only; model-specific pools never fill a missing
+account-wide `codex` limit pool only. Model-specific pools never fill a missing
 5h or 7d window. Legacy responses with an absent, null, or empty pool map use
-their default pool; malformed maps do not authorize a fallback.
+their default pool. Malformed maps do not authorize a fallback.
 
 The source verification recipe is [verify-herdr-agent-quota](docs/verify-herdr-agent-quota/SKILL.md).
 
@@ -131,12 +150,12 @@ The source verification recipe is [verify-herdr-agent-quota](docs/verify-herdr-a
 
 | Agent | Quota source | Attribution |
 | --- | --- | --- |
-| Codex | Codex app-server; 5h and/or 7d | Exact native session in one allowed account home |
-| Grok | CLI billing endpoint; 7d or 30d | Current CLI credentials |
-| Devin | CLI usage endpoint; 1d and 7d | Current CLI credentials |
-| Claude Code | StatusLine; 5h and 7d | Exact session observation |
-| Agy / Antigravity | StatusLine; 5h and 7d | Exact session and identifiable model pool |
-| OpenCode | OpenCode Go usage endpoint | Go credential; confirmed PAYG routes have no subscription quota |
+| Codex | Codex app-server. 5h and/or 7d | Exact native session in one allowed account home |
+| Grok | CLI billing endpoint. 7d or 30d | Current CLI credentials |
+| Devin | CLI usage endpoint. 1d and 7d | Current CLI credentials |
+| Claude Code | StatusLine. 5h and 7d | Exact session observation |
+| Agy / Antigravity | StatusLine. 5h and 7d | Exact session and identifiable model pool |
+| OpenCode | OpenCode Go usage endpoint | Go credential. Verified PAYG routes have no subscription quota |
 | Pi | Canonical Codex quota | Only when the recorded account matches |
 | OMP | `omp usage --json --provider <id>` | Reported account matching the session's credential pin |
 
@@ -156,19 +175,19 @@ plugin's current CLI credentials, without separate account attribution per pane.
 Claude/Agy do not report a reliable serving account ID, so their observations
 are not shared across sessions. Unknown
 identity or model-pool attribution does not produce a guessed quota. Failed
-requests preserve the last verified reading for that same account; they do not
+requests preserve the last verified reading for that same account. They do not
 turn failures into zero usage. Native Codex also requires unchanged credentials
 to retain that reading.
 
 ## Troubleshooting
 
-| Symptom | Check |
+| Symptom | Inspection |
 | --- | --- |
-| Session data is missing | Run `herdr integration status`; load missing integrations before restarting the affected agent |
+| Session data is missing | Run `herdr integration status`. Load missing integrations before restarting the affected agent |
 | Claude/Agy quota is missing | Send a turn so the session's StatusLine produces an observation |
-| OMP quota is missing | Check `omp usage --json --redact --provider <id>` |
-| Devin quota is missing | Check the CLI login and `DEVIN_CREDENTIALS_FILE` if customized |
-| Rows are missing | Run the configure action below to repair managed configuration |
+| OMP quota is missing | Inspect `omp usage --json --redact --provider <id>` |
+| Devin quota is missing | Inspect the CLI login and `DEVIN_CREDENTIALS_FILE` if customized |
+| Rows are missing | Run the configure action below to fix managed configuration |
 | Packed rows are truncated | Select `stacked` |
 
 ```sh
@@ -177,7 +196,7 @@ herdr plugin action invoke configure --plugin herdr-agent-quota
 ```
 
 Uninstall everything with `./uninstall.sh`, or remove a subset with
-`./uninstall.sh --agent grok`. Configuration changes are reversible; user-owned
+`./uninstall.sh --agent grok`. Configuration changes are reversible. User-owned
 settings and other agents remain intact.
 
 ## Contributing
