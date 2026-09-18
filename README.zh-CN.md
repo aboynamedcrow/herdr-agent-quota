@@ -20,6 +20,21 @@
 避免 `grok` 叠在 `Grok/grok-4.6` 上面。按额度排序和低额度通知默认关闭。
 空字段自动折叠，百分比可选择显示剩余或已用额度。
 
+## 共享账户缓存
+
+在插件配置目录中，将 `shared-usage-command` 设置为可信的 shell 命令。
+插件通过标准输入发送 JSON 请求，包含 `pane_id`、`provider` 和可选的 Codex `home`。
+命令返回以窗格 ID 为键的对象。每项包含 `snapshot`、`key` 和 `reason`。
+快照采用 `ProviderSnapshot` JSON 格式。命令必须验证账户身份，拒绝有歧义或过期的身份。
+
+此模式下，原生 Claude 和 Codex 从共享快照读取配额。
+插件每五秒读取一次缓存，包括空闲窗格。超过五分钟的快照不可用。
+本地会话仍提供上下文和提示缓存诊断。其他代理保留现有采集器。
+Herdr 清单读取失败时，共享监视器退出。
+
+若其他配置管理器拥有侧栏行和排序，请将 `external-layout` 设置为 `true`。
+配置、启动和卸载操作不修改这些布局设置。插件仍发布配额令牌。
+
 ## 安装与升级
 
 要求：**Herdr 0.9.0+**、`rust-toolchain.toml` 指定的 Rust 工具链、macOS 或 Linux，

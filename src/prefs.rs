@@ -29,7 +29,8 @@ pub const AGENT_ORDER: &str = "agent-order";
 pub const LOW_QUOTA_ALERT: &str = "low-quota-alert";
 
 /// Every preference a full uninstall must forget.
-pub const ALL: [&str; 10] = [
+pub const ALL: [&str; 11] = [
+    "shared-usage-command",
     AGENTS,
     CODEX_HOMES,
     WATCH_INTERVAL_SECONDS,

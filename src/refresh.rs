@@ -87,7 +87,7 @@ pub fn run(providers: &[Provider], force: bool, json: bool) -> Result<()> {
 pub fn startup(providers: &[Provider]) -> Result<()> {
     if let Ok(cache) = CacheStore::from_env() {
         let order = crate::configure::resolved_agent_order(None, Some(&cache));
-        if order.is_quota() {
+        if order.is_quota() && crate::prefs::read("external-layout").as_deref() != Some("true") {
             crate::configure::apply_agent_order(order);
         }
     }
@@ -123,7 +123,11 @@ pub fn watch(providers: &[Provider], interval_seconds: Option<u64>, defer: bool)
     let started = Instant::now();
     let started_at = SystemTime::now();
     let started_millis = CacheStore::now_millis();
-    let interval = Duration::from_secs(interval_seconds);
+    let interval = Duration::from_secs(if crate::shared_usage::enabled() {
+        5
+    } else {
+        interval_seconds
+    });
     if defer {
         wait_for_watch_tick(&cache, interval, started_at, started_millis);
     }
@@ -150,7 +154,7 @@ pub fn watch(providers: &[Provider], interval_seconds: Option<u64>, defer: bool)
         // one-hour cap below still prevents an orphaned process. The next
         // poll retries the single inventory call.
         let Ok(mut state) = list_agent_state() else {
-            if started.elapsed() >= MAX_ACTIVE_TURN_WATCH {
+            if crate::shared_usage::enabled() || started.elapsed() >= MAX_ACTIVE_TURN_WATCH {
                 break;
             }
             wait_for_watch_tick(&cache, interval, started_at, started_millis);
@@ -158,7 +162,7 @@ pub fn watch(providers: &[Provider], interval_seconds: Option<u64>, defer: bool)
         };
         let enabled = AgentSelection::from_args_or_env(&[]);
         state.panes.retain(|pane| enabled.contains(&pane.harness));
-        let active = state
+        let mut active = state
             .working_pane_ids
             .iter()
             .filter(|id| {
@@ -173,14 +177,25 @@ pub fn watch(providers: &[Provider], interval_seconds: Option<u64>, defer: bool)
             })
             .cloned()
             .collect::<Vec<_>>();
+        if crate::shared_usage::enabled() {
+            let mut shared: Vec<_> = state
+                .panes
+                .iter()
+                .filter(|p| crate::shared_usage::owns(p))
+                .cloned()
+                .collect();
+            publish_resolved(&cache, &mut shared, None, false)?;
+            state.panes.retain(|p| !crate::shared_usage::owns(p));
+            active.retain(|id| state.panes.iter().any(|p| p.pane_id == *id));
+        }
         let now = CacheStore::now_unix();
         let affected = watch_targets(&active, &previous_active, &mut settling, now);
         let _ = refresh_working_panes(&cache, &state.panes, &affected);
-        if active.is_empty() && settling.is_empty() {
+        if active.is_empty() && settling.is_empty() && !crate::shared_usage::enabled() {
             break;
         }
         previous_active = active;
-        if started.elapsed() >= MAX_ACTIVE_TURN_WATCH {
+        if started.elapsed() >= MAX_ACTIVE_TURN_WATCH && !crate::shared_usage::enabled() {
             break;
         }
         wait_for_watch_tick(&cache, interval, started_at, started_millis);
@@ -391,6 +406,19 @@ fn handle_named_pane(cache: &CacheStore, pane: AgentPane, topic_pane: Option<&st
         refresh_pane_topic(&mut panes[0]);
     }
     let resolved = route::resolve_with_identity(&panes[0]);
+    if crate::shared_usage::owns(&panes[0]) {
+        let entries = crate::shared_usage::load(&panes);
+        let tokens = vec![crate::shared_usage::tokens(
+            cache,
+            &panes[0],
+            resolved,
+            entries.get(&panes[0].pane_id),
+            CacheStore::now_unix(),
+            cache.percent_style().unwrap_or_default(),
+        )];
+        notify_low_quota(cache, &tokens);
+        return publish_pane_tokens(&panes, &tokens, CacheStore::now_millis());
+    }
     // A cross-harness route may reuse an original collector only after its
     // credential scope is proved. Pi's account-id match is the first such
     // route; its path-shaped session is deliberately not passed to Codex as a
@@ -781,6 +809,25 @@ fn refresh_provider(
     force: bool,
     panes: &[AgentPane],
 ) -> Result<ProviderOutcome> {
+    if crate::shared_usage::enabled() && matches!(provider, Provider::Claude | Provider::Codex) {
+        let other: Vec<_> = panes
+            .iter()
+            .filter(|p| !crate::shared_usage::owns(p))
+            .cloned()
+            .collect();
+        if other.iter().any(|p| {
+            route::resolve_with_identity(p).resolution
+                == Resolution::Subscription(BillingTarget::original_four(provider))
+        }) {
+            return refresh_canonical_provider(cache, provider, force, &other);
+        }
+        return Ok(ProviderOutcome {
+            provider,
+            available: false,
+            from_cache: true,
+            error: None,
+        });
+    }
     if provider == Provider::Codex && panes.iter().any(|pane| pane.harness == Harness::Codex) {
         let mut outcome = refresh_codex_accounts(cache, force, panes)?;
         // Pi's independently verified canonical account still needs its own
@@ -1124,9 +1171,21 @@ fn publish_resolved(
     let mut tokens = Vec::new();
     let now = CacheStore::now_unix();
     let style = cache.percent_style().unwrap_or_default();
+    let shared = crate::shared_usage::load(panes);
     let mut refreshed_targets = Vec::new();
     for pane in panes.iter_mut() {
         let resolved = route::resolve_with_identity(pane);
+        if crate::shared_usage::owns(pane) {
+            tokens.push(crate::shared_usage::tokens(
+                cache,
+                pane,
+                resolved,
+                shared.get(&pane.pane_id),
+                now,
+                style,
+            ));
+            continue;
+        }
         let force_target = if let Resolution::Subscription(target) = &resolved.resolution {
             let first = !refreshed_targets.contains(target);
             refreshed_targets.push(*target);
