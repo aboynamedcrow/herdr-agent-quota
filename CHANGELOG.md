@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Add `claude-statusline --collect-only` for account-aware status-line chains.
+  Store session diagnostics without invoking a shared previous command.
 - Read native Claude and Codex quotas through an optional shared-cache command.
   Update idle panes every five seconds and clear stale readings.
   Keep local session diagnostics and reject changed Codex account bindings.
@@ -20,6 +22,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Show `5h N/A` for missing Codex limits, matching Claude.
+  Keep the weekly limit on its quota row and retain percentage-style color rules.
 - Keep Codex quota windows within the account-wide `codex` pool instead of
   filling absent windows from unrelated model-specific limit pools.
 - Remove inherited `BASH_ENV` and `ENV` from upgrade-test installer commands so

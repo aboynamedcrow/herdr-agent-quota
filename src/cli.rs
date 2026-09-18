@@ -126,7 +126,11 @@ pub enum Command {
     /// Render the settings pane shown in the Herdr popup pane.
     Settings,
     /// Claude statusLine hook. Claude Code invokes this; not for manual use.
-    ClaudeStatusline,
+    ClaudeStatusline {
+        /// Save session metrics without running the previous statusLine command.
+        #[arg(long)]
+        collect_only: bool,
+    },
     /// Agy statusLine hook. Antigravity invokes this; not for manual use.
     AgyStatusline,
 }

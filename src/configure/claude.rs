@@ -68,6 +68,10 @@ pub fn uninstall_at(settings: &Path, state: &Path) -> Result<()> {
 }
 
 pub fn run_statusline_hook() -> Result<()> {
+    run_statusline_hook_mode(false)
+}
+
+pub fn run_statusline_hook_mode(collect_only: bool) -> Result<()> {
     let mut input = Vec::new();
     std::io::stdin().read_to_end(&mut input)?;
     if let Ok(value) = serde_json::from_slice::<Value>(&input) {
@@ -76,6 +80,9 @@ pub fn run_statusline_hook() -> Result<()> {
                 let _ = cache.save_statusline_observation(Provider::Claude, snapshot, &value);
             }
         }
+    }
+    if collect_only {
+        return Ok(());
     }
     let cache = CacheStore::from_env()?;
     let Some(output) = CONFIG.run_previous(cache.root(), &input)? else {

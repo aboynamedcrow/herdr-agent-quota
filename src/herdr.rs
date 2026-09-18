@@ -1341,7 +1341,7 @@ mod tests {
     #[test]
     fn empty_five_hour_publishes_week_beside_context() {
         let snapshot = crate::model::ProviderSnapshot::new(
-            Provider::Codex,
+            Provider::Grok,
             vec![crate::model::UsageWindow::new(
                 crate::model::WindowKind::Weekly,
                 31.0,

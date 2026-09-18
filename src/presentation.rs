@@ -229,7 +229,7 @@ fn windows_summary(
 }
 
 /// The 5h slot: the window when the provider reported one, otherwise the
-/// provider's placeholder (Claude/Agy keep a visible `5h N/A`; the rest omit
+/// provider's placeholder (Claude/Codex/Agy keep a visible `5h N/A`; the rest omit
 /// the row so the long window can fold onto context).
 fn five_hour_slot(
     windows: &[UsageWindow],
@@ -246,15 +246,10 @@ fn five_hour_slot(
 }
 
 fn missing_five_hour_label(provider: Provider) -> Option<&'static str> {
-    // Codex matches Grok: omit the 5h token so week can fold onto context.
-    // Claude/Agy keep a visible placeholder on their separate limits row.
+    // Native Claude and Codex share the same limits row, including unknowns.
     match provider {
-        Provider::Claude | Provider::Agy => Some("5h N/A"),
-        Provider::Codex
-        | Provider::Grok
-        | Provider::OpenCodeGo
-        | Provider::Omp
-        | Provider::Devin => None,
+        Provider::Claude | Provider::Codex | Provider::Agy => Some("5h N/A"),
+        Provider::Grok | Provider::OpenCodeGo | Provider::Omp | Provider::Devin => None,
     }
 }
 
@@ -843,8 +838,44 @@ mod tests {
         );
         let values = MetadataTokens::from_snapshot(&snapshot, 0);
         assert_eq!(values.quota_week, "7d 69% 6d0h");
-        assert_eq!(values.quota_5h, "");
-        assert_eq!(values.quota_5h_severity, None);
+        assert_eq!(values.quota_5h, "5h N/A");
+        assert_eq!(values.quota_5h_severity, Some(Severity::Unknown));
+    }
+
+    #[test]
+    fn claude_and_codex_use_the_same_colors_in_both_percent_styles() {
+        for provider in [Provider::Claude, Provider::Codex] {
+            for (used, severity) in [
+                (0.0, Severity::Normal),
+                (50.0, Severity::Normal),
+                (51.0, Severity::Warning),
+                (80.0, Severity::Warning),
+                (81.0, Severity::Danger),
+                (100.0, Severity::Danger),
+            ] {
+                let snapshot = ProviderSnapshot::new(
+                    provider,
+                    vec![
+                        window(WindowKind::FiveHour, used, 14_820),
+                        window(WindowKind::Weekly, used, 183_600),
+                    ],
+                    0,
+                );
+                for style in [PercentStyle::Used, PercentStyle::Remaining] {
+                    let values =
+                        MetadataTokens::from_snapshot_for_session(&snapshot, 0, None, style);
+                    assert_eq!(values.quota_5h_severity, Some(severity));
+                    assert_eq!(values.quota_week_severity, Some(severity));
+                    let percent = if style == PercentStyle::Used {
+                        used
+                    } else {
+                        100.0 - used
+                    };
+                    assert!(values.quota_5h.starts_with(&format!("5h {percent:.0}% ")));
+                    assert!(!values.quota_5h.contains("left") && !values.quota_5h.contains("used"));
+                }
+            }
+        }
     }
 
     #[test]

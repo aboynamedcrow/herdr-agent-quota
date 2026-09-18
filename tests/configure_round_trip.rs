@@ -508,6 +508,36 @@ fn claude_collector_is_silent_without_a_previous_statusline() {
 }
 
 #[test]
+fn collect_only_records_context_without_running_a_shared_previous_command() {
+    let state = tempdir().unwrap();
+    fs::write(
+        state.path().join("claude-statusline.original.json"),
+        r#"{"type":"command","command":"printf WRONG-ACCOUNT"}"#,
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_herdr-agent-quota"))
+        .args(["claude-statusline", "--collect-only"])
+        .env("HERDR_PLUGIN_STATE_DIR", state.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(include_bytes!("fixtures/claude/statusline-both.json"))
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(state
+        .path()
+        .join("claude-statusline.observation.json")
+        .exists());
+}
+
+#[test]
 fn claude_collector_does_not_wait_for_a_refresh_lock() {
     let state = tempdir().unwrap();
     let mut locker = hold_refresh_lock_in_child(state.path());
@@ -2158,9 +2188,10 @@ fn pi_codex_event_overlays_exact_session_context_and_cache_without_inventing_ttl
     assert!(calls.contains("--token quota_cache=cache 85.0%"), "{calls}");
     assert!(!calls.contains("quota_cache_ttl"), "{calls}");
     assert!(
-        calls.contains("--token quota_week_inline_normal=7d 80%"),
+        calls.contains("--token quota_week_normal=7d 80%"),
         "{calls}"
     );
+    assert!(calls.contains("--token quota_5h_unknown=5h N/A"), "{calls}");
 }
 
 #[test]
