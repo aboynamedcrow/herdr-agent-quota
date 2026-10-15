@@ -91,7 +91,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not used as a model. A missing or malformed models catalog leaves the raw
   id and does not fail the quota read. Per-session active models are read
   from `~/.local/share/devin/cli/sessions.db` (SQLite, read-only, selecting
-  only `id` and `model` — the omp `models.db` discipline, not `agent.db`),
+  only `id` and `model`, the omp `models.db` discipline, not `agent.db`),
   so two panes running different `/model` selections each show their own
   model.
   Snapshots are stamped with `sha256("devin\0" || key)`
@@ -100,7 +100,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `configure --apply` rewrites the shared `ui.sidebar.agents.rows` array only
   when it is empty, already managed by this plugin, or matches Herdr's default
   `["state_icon", "agent"]` row. Rows from another plugin or the user are
-  left intact. `rows_by_agent`, managed `row_gap`, and keybindings are still
+  left unchanged. `rows_by_agent`, managed `row_gap`, and keybindings are still
   added or updated. `workspace` and `pane` tokens are not treated as a safe
   default, so they cannot be silently replaced with `tab`.
 
@@ -121,8 +121,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   #57.
 - `configure` no longer runs `normalize_official_row` when generating
   `rows_by_agent` from user-owned shared rows, so tokens such as `pane` and
-  `terminal_title_stripped` stay intact. With brand colors off, those custom
-  shared rows still read plugin-managed per-agent quota rows — only the brand
+  `terminal_title_stripped` stay unchanged. With brand colors off, those custom
+  shared rows still read plugin-managed per-agent quota rows. Only the brand
   hue is omitted. Default Herdr rows are unchanged: brand off still writes no
   `rows_by_agent` copies.
 - `configure` prints which user-owned `rows_by_agent` entries it left alone,
@@ -138,8 +138,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - omp (oh-my-pi) is a supported harness: `--agent omp`, its own settings row,
   and automatic installation of Herdr's `omp` integration when selected. Model,
-  context, and cache come from the same transcript reader Pi uses — omp is a
-  fork of Pi and still writes JSONL v3 — with two field renames handled in the
+  context, and cache come from the same transcript reader Pi uses (omp is a
+  fork of Pi and still writes JSONL v3), with two field renames handled in the
   shared parser (`cttl.ephemeral1h` for Anthropic's one-hour cache writes, and
   omp's authoritative `contextTokens`). The agent directory is recovered from
   the absolute session path Herdr reports rather than from this process's
@@ -192,7 +192,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `--agent-order quota` sorts Herdr's Agent panel by the least quota left, so
   the agent closest to its limit is at the top. It is a Herdr `agent.view.set`
-  owned by this plugin, sorted on a new `quota_headroom` token — the remaining
+  owned by this plugin, sorted on a new `quota_headroom` token: the remaining
   percentage of the tighter of the pane's 5h and 7d windows, zero-padded so
   Herdr's ordering of the token text is also its numeric ordering. The token is
   published for every pane whose quota is known, whether or not the order is
@@ -202,7 +202,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   anyway. Herdr keeps one Agent view, so this replaces the user's own
   `ui.agent_panel_sort` until it is set back to `default`. A full uninstall
   hands the panel back. The view does not survive a Herdr restart, so the
-  plugin's startup hook re-applies it — and only when it is this plugin's to
+  plugin's startup hook re-applies it, and only when it is this plugin's to
   re-apply, leaving a view someone else owns alone.
 - `--low-quota-alert <percent>` shows one Herdr notification when a provider's
   remaining quota falls to that percentage or below. One warning per provider,
@@ -219,7 +219,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sidebar layout, the row gap, the watcher interval, the brand colours, the
   visible fields, and the installed agents, and applies them by re-invoking
   `configure` with every value named explicitly, then reloading Herdr's
-  configuration and forcing one refresh — the same path the "Install / fix"
+  configuration and forcing one refresh. This is the same path the "Install / fix"
   action takes, so there is still one writer for the sidebar rows and the
   statusLine entries. Herdr injects `HERDR_PLUGIN_STATE_DIR`,
   `HERDR_PLUGIN_CONFIG_DIR`, and `HERDR_BIN_PATH` into a pane, which is what
@@ -230,7 +230,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `--fields` chooses which quota fields the sidebar shows: `all` (default),
   `none`, or a comma-separated list of `topic`, `model`, `cache`, `ttl`,
   `context`, `5h`, `7d`. The provider name and the error token are not
-  optional — a row that cannot say which subscription it belongs to, or that
+  optional. A row that cannot say which subscription it belongs to, or that
   hides why quota is missing, is worse than no row. Hiding the model degrades
   the packed identity token from `$quota_provider_model` to `$quota_provider`
   rather than leaving the row nameless.
@@ -242,7 +242,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   used` (on `./install.sh` and `herdr-agent-quota configure --apply`, or
   `$HERDR_AGENT_QUOTA_PERCENT` for a direct CLI run) flips every 5h/7d/30d
   number in the sidebar and the dashboard. `remaining` stays the default. The
-  sidebar token keeps its width — no `left`/`used` word rides along — and the
+  sidebar token keeps its width (no `left`/`used` word rides along), and the
   severity colour is still computed from the remaining quota, so red keeps
   meaning "little runway". The choice is stored in the plugin state directory
   as well as the config directory, because the Claude/Agy statusLine hooks are
@@ -259,7 +259,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Agy quota is no longer misread when a bucket reports `remaining_percent`
   rather than `remaining_fraction`. The scale now comes from the key name. The
   previous "below 1.0 means a fraction" heuristic rendered `remaining_percent:
-  1.0` — a nearly exhausted pool — as 100% remaining and coloured it green.
+  1.0` (a nearly exhausted pool) as 100% remaining and coloured it green.
 - `./install.sh --agent`, `./uninstall.sh --agent`, and
   `--watch-interval-seconds` now reach `configure`. Herdr runs a plugin action
   with a fixed command line in the **server's** environment, so the variables
@@ -270,7 +270,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A single-pane agent event no longer discards the other panes' cached context
   and model. The read only enriches the session the event named, and the save
   path dropped every session it had not looked at, so a sibling pane's context
-  was cleared and then republished on the next refresh — one avoidable
+  was cleared and then republished on the next refresh: one avoidable
   metadata write, and one avoidable repaint, per cycle.
 - The dashboard pane now lists OpenCode Go, including the 30d window that the
   sidebar has no token for. Both READMEs promised this. Nothing rendered it.
@@ -622,7 +622,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Provider labels now use separate brand-aware `rows_by_agent` styling: Claude
   soft orange, Codex pastel blue, soft white for Grok, and Antigravity-inspired
   mint for Agy. Quota health colors use the same low-strain pastel palette.
-  Existing user-owned agent row overrides remain untouched.
+  Existing user-owned agent row overrides remain unchanged.
 
 - Dropped the unmaintained `fs2` dependency in favour of the standard library's
   file locking, and made `libc` a Unix-only dependency.
