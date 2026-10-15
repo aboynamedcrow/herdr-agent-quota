@@ -13,7 +13,7 @@
 > 改动：(1) 账户身份与 API key 判定全部来自 `omp usage --json`
 > （report 的 `metadata` 带 email/accountId/orgId/projectId），**不读
 > `agent.db`**，因此不碰任何 OAuth token；(2) context window 走 `models.db`
-> 的只读 rusqlite 查询，而不是再 spawn 一次 `omp models --json` —— rusqlite
+> 的只读 rusqlite 查询，而不是再 spawn 一次 `omp models --json`：rusqlite
 > 本来就是本仓库的依赖，而 model catalog 不含机密。Anthropic OAuth 已登录并做了
 > 实测，但其 usage endpoint 当前返回 HTTP 429，因而尚未取得真实 Anthropic quota report。
 
@@ -83,9 +83,9 @@ CREATE TABLE usage_history (recorded_at, provider, account_key, email, account_i
 |---|---|---|
 | `omp usage --json` | 全部账户的归一化 limit | 0.31–0.33s |
 | `omp usage --json --provider anthropic` | 单 provider | 同上 |
-| `omp usage invalidate [--provider p]` | 作废用量缓存 | — |
+| `omp usage invalidate [--provider p]` | 作废用量缓存 | n/a |
 | `omp models --json` | 每个模型的 `contextWindow` / `maxTokens` / `cost` | 0.37–0.39s |
-| `omp config path` | 当前 agent 目录 | — |
+| `omp config path` | 当前 agent 目录 | n/a |
 
 空凭证时 `omp usage --json` 返回：
 
@@ -103,7 +103,7 @@ xAI 侧的 id 是 `1w` / `1mo`，Codex 侧 provider id 是 `openai-codex`。
 
 **缓存行为是这个方案能成立的关键**：`omp usage` 走的是
 `authStorage.fetchUsageReports()`（不带 forceRefresh），命中 `AuthStorageUsageCache`，
-而该 cache 的后端就是 `agent.db` 的 `cache` 表 —— 跨进程持久。所以我们每次 spawn
+而该 cache 的后端就是 `agent.db` 的 `cache` 表，跨进程持久。所以我们每次 spawn
 `omp usage --json` **不等于**每次打一次 provider 的用量端点：5 分钟 TTL（带 ±25% 抖动）
 内是纯本地读，超时才回源，失败还有 last-good 兜底。omp 自己的注释写明这是因为
 Anthropic / OpenAI 的 `/usage` 按 IP 限流。
@@ -142,14 +142,14 @@ schema，而 omp 迭代很快（v18，日更），不值。B 可作为后续优�
    → 验证：`cargo test`，新增 provider_contracts 用例。
 2. `src/omp.rs`（新）：会话解析从 `src/pi.rs` 抽公共部分。**先抽再加**：把 JSONL v3 的分支/
    模型/usage/缓存统计逻辑提成 `session_jsonl` 模块，pi 与 omp 各自保留自己的
-   凭证与模型目录读法。AGENTS.md 的规矩是「两个真实调用方再抽象」——这里正好是两个。
+   凭证与模型目录读法。AGENTS.md 的规矩是「两个真实调用方再抽象」，这里正好是两个。
    → 验证：pi 现有测试全绿 + omp 用同构 fixture。
 3. `src/providers/omp.rs`（新）：`omp usage --json` 解析成 `ProviderSnapshot`。
    要点：只取 `durationMs` 能识别的 5h / 7d 窗口；`usedFraction` 缺失时按
    `resolveUsedFraction` 的同一优先级回退；任何字段缺失/类型不对就丢掉这个窗口而不是猜 0%
    （与 `opencode_go.rs` 的 fail-closed 风格一致）；`status` 不参与判断。
    → 验证：用真实输出录 fixture 做解析测试。
-4. `src/route.rs`：`Harness::Omp` 分支 —— 会话文件给出 provider/model/context，
+4. `src/route.rs`：`Harness::Omp` 分支：会话文件给出 provider/model/context，
    `credential_pin` 给出账户 hash，与 `omp usage --json` 的 report 身份字段
    （`sha256(provider\0accountId\0email\0orgId\0projectId)`）比对，命中则
    `Resolution::Subscription(BillingTarget::omp(provider))`，否则 `Indeterminate`。
@@ -171,7 +171,7 @@ schema，而 omp 迭代很快（v18，日更），不值。B 可作为后续优�
 ## 与「读写 pane 不是免费的」这条铁律的关系
 
 这套方案不新增任何 `herdr pane read`。omp 的所有证据都来自本地文件和自身 CLI，
-事件路径的权限表不变。唯一新增的是每次 refresh 最多一次 `omp usage --json` 子进程 ——
+事件路径的权限表不变。唯一新增的是每次 refresh 最多一次 `omp usage --json` 子进程，
 **必须按刷新轮次调用一次，而不是按 pane**（同一 provider 的多个 omp pane 共用一份 snapshot），
 并且要进 `CacheStore`，TTL 不小于 omp 自己的 5 分钟，否则 watch 脉冲（默认 60s）会
 每分钟 spawn 一次 bun 进程。`quota_headroom` 与低额告警的既有规则原样适用。
@@ -201,7 +201,7 @@ schema，而 omp 迭代很快（v18，日更），不值。B 可作为后续优�
 - SuperGrok 的同一个周窗口会报两条 limit（`xai-oauth:credits:1w` 与
   `xai-oauth:product:grokbuild:1w`），「限定词最少者胜」的规则选中了前者。
 - **Antigravity 报的是 daily 池，Cursor 报的是没有窗口的消费额**。两者都没有侧边栏
-  可放的槽位，因此整条丢弃而不是塞进周窗口——把按天的数字显示成按周的，比空着更糟。
+  可放的槽位，因此整条丢弃而不是塞进周窗口：把按天的数字显示成按周的，比空着更糟。
 
 ## 仍未验证的项
 
@@ -211,7 +211,7 @@ schema，而 omp 迭代很快（v18，日更），不值。B 可作为后续优�
    anthropic` 把账号列在 `accountsWithoutUsage`，脱敏日志显示 usage 请求为 HTTP
    429。因而仍缺真实 Anthropic limit payload。源码里预期是 `anthropic:5h` /
    `anthropic:7d`，另有
-   `anthropic:7d:opus` 这类按模型的子池——「限定词最少者胜」正是为它写的，但没实测过）。
+   `anthropic:7d:opus` 这类按模型的子池，「限定词最少者胜」正是为它写的，但没实测过）。
    → 等冷却后只运行一次 `omp usage --json --redact --provider anthropic`；不要用紧密轮询测试。
 2. 缓存行为实测只比较两次间隔足够长的 `omp usage --json` 结果与耗时。
    `agent.db` 含活跃 OAuth token，插件和诊断流程都不得直接打开它。

@@ -131,7 +131,7 @@ GrokWeeklyUsage {
 
 CodexBar 也实现了 `grok agent stdio` ACP JSON-RPC 的 `initialize` + `x.ai/billing`，但其文档记录 grok 0.1.210 的 agent-stdio surface 返回 `-32601 Method not found`，只能回退到 web/CLI-proxy；此外还遇到 Grok ACP 不解码 `\/` method name 的兼容问题（[CodexBar ACP notes](https://github.com/steipete/CodexBar/blob/a0cecb1f1d08dbf26eb11a909dc976f5067030b5/docs/grok.md#data-sources--fallback-order)）。
 
-ACP 路径不是常驻 daemon——CodexBar 每次 fetch 会 spawn `grok agent stdio`，并在 timeout 时终止子进程（[CodexBar RPC client](https://github.com/steipete/CodexBar/blob/a0cecb1f1d08dbf26eb11a909dc976f5067030b5/Sources/CodexBarCore/Providers/Grok/GrokRPCClient.swift#L3-L7)、[timeouts/teardown](https://github.com/steipete/CodexBar/blob/a0cecb1f1d08dbf26eb11a909dc976f5067030b5/Sources/CodexBarCore/Providers/Grok/GrokRPCClient.swift#L166-L201)）。但对 Herdr 轻量插件来说，直接一条 HTTP 请求更简单、启动更快、失败面更小。
+ACP 路径不是常驻 daemon：CodexBar 每次 fetch 会 spawn `grok agent stdio`，并在 timeout 时终止子进程（[CodexBar RPC client](https://github.com/steipete/CodexBar/blob/a0cecb1f1d08dbf26eb11a909dc976f5067030b5/Sources/CodexBarCore/Providers/Grok/GrokRPCClient.swift#L3-L7)、[timeouts/teardown](https://github.com/steipete/CodexBar/blob/a0cecb1f1d08dbf26eb11a909dc976f5067030b5/Sources/CodexBarCore/Providers/Grok/GrokRPCClient.swift#L166-L201)）。但对 Herdr 轻量插件来说，直接一条 HTTP 请求更简单、启动更快、失败面更小。
 
 ## 限制、稳定性与安全边界
 

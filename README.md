@@ -206,7 +206,7 @@ herdr plugin action invoke configure --plugin herdr-agent-quota
 
 Uninstall everything with `./uninstall.sh`, or remove a subset with
 `./uninstall.sh --agent grok`. Configuration changes are reversible. User-owned
-settings and other agents remain intact.
+settings and other agents remain unchanged.
 
 ## Contributing
 

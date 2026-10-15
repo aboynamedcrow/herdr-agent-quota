@@ -28,7 +28,7 @@
 | [ilia-pluzhnikov/claude-code-statusline](https://github.com/ilia-pluzhnikov/claude-code-statusline) | 低星 | Claude statusLine | 同：stdin 计数 + 约 16 KiB transcript 尾 + 桶 + timestamp。承认 stdin 没有 TTL | 本仓库既有调研 [`cache-observability-open-source.md`](cache-observability-open-source.md) |
 | OpenCode `opencode-cache-hit` / `opencode-cache-timer` | 插件级 | OpenCode 面板 | **按 provider 写死默认 TTL**：Anthropic 5m、OpenAI 5m、Google 1h、DeepSeek 2h、xAI 5m。显示的是「已经活了多久」相对这个猜测值，不是 entry expiry | [npm opencode-cache-hit](https://www.npmjs.com/package/opencode-cache-hit) |
 | [GandzyTM/claude-cache-statusline](https://github.com/GandzyTM/claude-cache-statusline) | 0 | Claude statusLine | 假定滑动 1h；用 transcript **字节增长**当 last-activity（不用 mtime） | 项目 README |
-| [duyet/codex-claude-plugins](https://github.com/duyet/codex-claude-plugins) | — | Claude statusLine | Anthropic 才显示 TTL；`cache_ttl` 配置 `"5m"` 或 `"1h"`，新请求重置时钟 | [statusline README](https://github.com/duyet/codex-claude-plugins/blob/master/statusline/README.md) |
+| [duyet/codex-claude-plugins](https://github.com/duyet/codex-claude-plugins) | n/a | Claude statusLine | Anthropic 才显示 TTL；`cache_ttl` 配置 `"5m"` 或 `"1h"`，新请求重置时钟 | [statusline README](https://github.com/duyet/codex-claude-plugins/blob/master/statusline/README.md) |
 
 星数只作筛选权重。低星项目里只要算法被高星复用（transcript + 桶），仍记为同一族。
 

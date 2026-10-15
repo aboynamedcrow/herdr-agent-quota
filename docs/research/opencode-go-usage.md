@@ -107,7 +107,7 @@ CodexBar 还实现了 web console cookie 抓取、`_server` RPC、Zen 余额、�
 ## 证据等级与未决项
 
 - **一手实测**：端点存在性、401 错误体、opencode 本地存储与 provider id。
-- **二手可信**：成功响应的字段名与 percent 语义 —— 来自 CodexBar 的实现和它自己的
+- **二手可信**：成功响应的字段名与 percent 语义，来自 CodexBar 的实现和它自己的
   测试。CodexBar 有真实订阅用户在用，但这仍不是本仓库维护者亲眼看到的线上响应。
 - **未验证**：真实线上响应是否还带有其他字段；`status` 是否在某些账户状态下出现；
   限流（429）时的响应体；`resetInSec` 与 `resetsAt` 在当前部署中究竟用哪个。
